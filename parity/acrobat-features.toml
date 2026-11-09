@@ -4707,11 +4707,11 @@ title = "Rich-text field values"
 area = "F"
 tier = "P2"
 milestone = "M6"
-status = "planned"
+status = "partial"
 commands = []
 tools = []
-evidence = []
-notes = ""
+evidence = ["crates/forms/src/rich.rs::spans_take_their_tags_and_css", "crates/forms/src/rich.rs::the_default_style_comes_from_ds_then_each_element", "crates/forms/src/rich.rs::paragraphs_and_line_breaks_become_returns", "crates/forms/src/rich.rs::malformed_empty_or_oversized_values_are_not_read", "crates/forms/src/tests.rs::a_rich_value_draws_its_bold_and_italic_runs", "crates/forms/src/tests.rs::a_rich_value_changes_size_and_colour_mid_line", "crates/forms/src/tests.rs::a_multiline_rich_value_wraps_across_runs_and_aligns_paragraphs", "crates/forms/src/tests.rs::a_rich_value_writes_winansi_bytes", "crates/forms/src/tests.rs::a_rich_value_that_cannot_be_drawn_falls_back_to_the_plain_value", "crates/forms/src/tests.rs::an_unchanged_value_keeps_the_rich_text_and_a_new_one_drops_it"]
+notes = "A text field with the rich text flag is drawn from its /RV (XHTML) over the style of its /DA and /DS: bold, italic, size, colour and underline per run, paragraphs and line breaks, wrapping across runs in multiline fields and each paragraph's text-align, in the standard 14 fonts nearest each family (Helvetica, Times, Courier). Filling a field with the value it already has keeps its /RV; a new value drops it. Read: body, p, div, span, br, b/strong, i/em, u and the CSS font, font-family, font-weight, font-style, font-size, color, text-decoration and text-align. Falls back to the plain value for a /RV that is malformed, larger than 256 KiB or 20,000 nodes, written for another value, or holds characters outside WinAnsi (Thai, CJK and Greek keep their plain-value fonts), and for comb and password fields. Missing: writing a rich value (no tool fills one), styled editing in the field editor, embedded or other fonts named by font-family, justified text (drawn left), and an automatic size measured per run (one is chosen for the plain text in the first run's font)."
 
 [[feature]]
 id = "form.af-number"

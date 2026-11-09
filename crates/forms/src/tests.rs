@@ -2340,6 +2340,101 @@ fn auto_sized_text_is_measured_in_the_bold_font() {
     assert!(bold < regular, "bold is wider, so it auto-sizes smaller: {bold} vs {regular}");
 }
 
+/// A text field `rich` (multiline or not) with `value` in `/V`, the rich text flag and `/RV`
+/// `rv`, redrawn: its appearance's content bytes and the font resources it uses.
+fn rich_field(rv: &str, value: &str, multiline: bool) -> (Vec<u8>, Vec<String>) {
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 600.0, 250.0, 680.0], &NewField::Text { multiline }, Some("rich")).unwrap();
+    let f = field(&fields(&doc), "rich").clone();
+    let ff = flags::RICH_TEXT | if multiline { flags::MULTILINE } else { 0 };
+    doc.update_dict(f.obj, |d| {
+        d.set(b"Ff".to_vec(), Object::Int(i64::from(ff)));
+        d.set(b"DA".to_vec(), PdfString::literal(b"/Helv 12 Tf 0 g".to_vec()));
+        d.set(b"V".to_vec(), Object::String(PdfString::text(value)));
+        d.set(b"RV".to_vec(), Object::String(PdfString::text(rv)));
+    })
+    .unwrap();
+    redraw_field(&mut doc, "rich").unwrap();
+    let w = field(&fields(&doc), "rich").widgets[0].obj;
+    let n = doc.get(w).as_dict().unwrap().get(b"AP").unwrap().as_dict().unwrap().reference(b"N").unwrap();
+    let Object::Stream(s) = &*doc.get(n) else { panic!() };
+    let res = s.dict.get(b"Resources").and_then(Object::as_dict).and_then(|r| r.get(b"Font")).and_then(Object::as_dict).cloned().unwrap_or_default();
+    let mut fonts: Vec<String> = res.iter().map(|(k, _)| String::from_utf8_lossy(k).into_owned()).collect();
+    fonts.sort();
+    (s.decoded().unwrap(), fonts)
+}
+
+const XHTML: &str = "<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:xfa=\"http://www.xfa.org/schema/xfa-data/1.0/\" xfa:APIVersion=\"Acroform:2.7.0.0\" xfa:spec=\"2.1\">";
+
+/// Issue #3: bold and italic runs are drawn in the bold and italic standard fonts, each placed
+/// after the one before at its own width, inside `/Tx BMC`.
+#[test]
+fn a_rich_value_draws_its_bold_and_italic_runs() {
+    let rv = format!("{XHTML}<p dir=\"ltr\">Plain <b>bold</b> <i>italic</i></p></body>");
+    let (ap, fonts) = rich_field(&rv, "Plain bold italic", false);
+    let ap = String::from_utf8_lossy(&ap);
+    assert_eq!(fonts, ["HeBo", "HeOb", "Helv"], "{ap}");
+    let at = |s: &str| ap.find(s).unwrap_or_else(|| panic!("{s} in {ap}"));
+    assert!(at("/Helv 12 Tf") < at("(Plain ) Tj") && at("(Plain ) Tj") < at("/HeBo 12 Tf") && at("(bold) Tj") < at("/HeOb 12 Tf"), "{ap}");
+    assert!(ap.contains("/Tx BMC") && ap.trim_end().ends_with("EMC"), "{ap}");
+    // "Plain " in Helvetica is 2501 units wide, 30.012 at 12 pt, so "bold" starts at 3 + 30.012.
+    assert!(ap.contains("1 0 0 1 33.012 "), "bold starts after the plain run: {ap}");
+}
+
+/// Issue #3: a size change and a colour change mid-line, and an underlined run.
+#[test]
+fn a_rich_value_changes_size_and_colour_mid_line() {
+    let rv = format!(
+        "{XHTML}<p>small <span style=\"font-size:18pt;color:#ff0000\">BIG</span> <span style=\"text-decoration:underline\">under</span></p></body>"
+    );
+    let (ap, _) = rich_field(&rv, "small BIG under", false);
+    let ap = String::from_utf8_lossy(&ap);
+    assert!(ap.contains("/Helv 18 Tf\n1 0 0 rg") && ap.contains("(BIG) Tj"), "{ap}");
+    assert!(ap.contains("/Helv 12 Tf\n0 0 0 rg") && ap.contains("(small ) Tj"), "{ap}");
+    assert!(ap.matches(" re f\n").count() >= 1 && ap.find("(under) Tj") < ap.rfind(" re f"), "an underline after the text: {ap}");
+}
+
+/// Issue #3: a multiline rich value wraps across runs and keeps each paragraph's alignment.
+#[test]
+fn a_multiline_rich_value_wraps_across_runs_and_aligns_paragraphs() {
+    let rv = format!(
+        "{XHTML}<p>A long first paragraph that <b>has to wrap over</b> several lines of the box</p><p style=\"text-align:right\">right</p></body>"
+    );
+    let (ap, _) = rich_field(&rv, "A long first paragraph that has to wrap over several lines of the box\rright", true);
+    let ap = String::from_utf8_lossy(&ap);
+    let rows: Vec<f64> = ap.lines().filter_map(|l| l.strip_suffix(" Tm")).filter_map(|l| l.split(' ').nth(5)?.parse().ok()).collect();
+    let mut distinct = rows.clone();
+    distinct.dedup();
+    assert!(distinct.len() >= 3, "wrapped onto several lines: {ap}");
+    // "right" in Helvetica is 1945 units wide, 23.34 at 12 pt: it ends at the right padding (200 - 3).
+    assert!(ap.contains("1 0 0 1 173.66 "), "right aligned: {ap}");
+}
+
+/// Issue #3: text outside ASCII is written in WinAnsi bytes, as the plain value is.
+#[test]
+fn a_rich_value_writes_winansi_bytes() {
+    let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Zürich</b></p></body>"), "Zürich", false);
+    assert_eq!(fonts, ["HeBo"], "drawn as rich text");
+    assert!(ap.windows(8).any(|x| x == b"(Z\xfcrich)"), "{}", String::from_utf8_lossy(&ap));
+}
+
+/// Issue #3: a `/RV` that can't be drawn as rich text draws the plain value, exactly as a field
+/// without one: malformed XHTML, a `/RV` for another value, and text the standard fonts can't hold.
+#[test]
+fn a_rich_value_that_cannot_be_drawn_falls_back_to_the_plain_value() {
+    let plain = |value: &str| rich_field("", value, false).0;
+    for (rv, value, why) in [
+        (format!("{XHTML}<p><b>Ada</p></body>"), "Ada", "malformed"),
+        (format!("{XHTML}<p><b>Grace</b></p></body>"), "Ada", "stale: /V changed after /RV was written"),
+        (format!("{XHTML}<p><b>Ωμέγα</b></p></body>"), "Ωμέγα", "not in the standard fonts"),
+    ] {
+        assert_eq!(rich_field(&rv, value, false).0, plain(value), "{why}");
+    }
+    let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Ada</b></p></body>"), "Ada", false);
+    assert_ne!(ap, plain("Ada"), "a readable /RV is drawn rich");
+    assert_eq!(fonts, ["HeBo"]);
+}
+
 /// Issue #1: a `/DA` that already names a bold or italic standard font, by resource or base font
 /// name, reads back as that font rather than as Helvetica; any other font still reads as Helvetica.
 #[test]
