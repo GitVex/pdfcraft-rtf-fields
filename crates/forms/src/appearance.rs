@@ -25,6 +25,7 @@
 
 use pdfcraft_cos::{Dict, Document, Object, Stream};
 use pdfcraft_fonts::pdf::Metrics;
+use pdfcraft_fonts::shaped_glyph as shaped_glyph_of;
 use pdfcraft_fonts::shaped_text::{self, Piece, ShapedFonts};
 use pdfcraft_fonts::{UnicodeCMap, cjk_width, helvetica_width, literal, win_ansi, wrap_with};
 
@@ -838,13 +839,17 @@ fn field_appearance_fit(doc: &Document, f: &Field, w: &Widget, values: &[String]
         && text.chars().any(shaped_text::is_thai)
         && !dr.as_ref().is_some_and(|(_, enc)| matches!(enc, FontText::Simple(_)) && can_show(enc, &text))
         && shaped_text::thai_refusal(&text).is_none();
-    let latin_text: String = if thai { text.chars().filter(|c| !shaped_text::is_thai(*c)).collect() } else { text.clone() };
+    // Symbols no standard font has (☐ ✓ ★) are drawn the same way from the craft-fonts symbol
+    // faces (#10), unless the form's own font holds the text.
+    let shaped = thai || symbols_drawn(f, dr.as_ref().is_some_and(|(_, enc)| matches!(enc, FontText::Simple(_)) && can_show(enc, &text)), &text);
+    let latin_text: String =
+        if shaped { text.chars().filter(|c| !shaped_text::is_thai(*c) && !shaped_text::is_fallback_symbol(*c)).collect() } else { text.clone() };
     let (font_name, font_obj, enc) = match dr.filter(|(_, enc)| can_show(enc, &latin_text)) {
         Some((o, enc)) => (da.font.clone(), o, enc),
         None => ("Helv".to_string(), helvetica(), FontText::WinAnsi),
     };
     let width_of =
-        |text: &str, size: f64| if thai { shaped_text::thai_width(text, size, |s, size| enc.width(s, size)) } else { enc.width(text, size) };
+        |text: &str, size: f64| if shaped { shaped_text::fallback_width(text, size, |s, size| enc.width(s, size)) } else { enc.width(text, size) };
     // How far a line's ink reaches below and above its baseline (em), where Thai stacks or
     // descenders reach past the form font's (Helvetica's) -0.207 and 0.718; `None` otherwise.
     let thai_ink = |line: &str| thai.then(|| shaped_text::thai_reach(line)).flatten().map(|[lo, hi]| [lo.min(-0.207), hi.max(0.718)]);
@@ -968,7 +973,7 @@ fn field_appearance_fit(doc: &Document, f: &Field, w: &Widget, values: &[String]
             }
         }
     }
-    let (body, fonts, unencodable) = draw_lines(&shown, size, &font_name, font_obj, &enc, thai);
+    let (body, fonts, unencodable) = draw_lines(&shown, size, &font_name, font_obj, &enc, shaped);
     // Acrobat regenerates only what is inside /Tx BMC when it redraws a field (e.g. on focus
     // changes), discarding what came before it (issues #1613, #633). The background and border
     // therefore go inside the marked-content block too, so a redraw keeps them with the text.
@@ -997,9 +1002,16 @@ fn field_appearance_fit(doc: &Document, f: &Field, w: &Widget, values: &[String]
     (Stream::flate(d, &content), unencodable, overflow)
 }
 
+/// Whether a text field or combo box draws the fallback symbols in `text` from the craft-fonts
+/// symbol faces: it has some, it isn't a comb field, and the form's own font doesn't hold the text
+/// (`own_font_holds`).
+fn symbols_drawn(f: &Field, own_font_holds: bool, text: &str) -> bool {
+    matches!(f.kind, FieldKind::Text | FieldKind::Combo) && !f.is_comb() && !own_font_holds && text.chars().any(shaped_text::is_fallback_symbol)
+}
+
 /// The text operators for the `shown` lines (where each starts, and what it says) at `size`, in
-/// the field's font `font_name` (`font`, written with `enc`) and, with `thai`, their Thai from the
-/// Thai face; the font resources they use, and the first character drawn as `?` because the
+/// the field's font `font_name` (`font`, written with `enc`) and, with `thai`, their Thai and
+/// fallback symbols from the craft-fonts faces; the font resources they use, and the first character drawn as `?` because the
 /// font can't hold it, for the caller to report.
 fn draw_lines(shown: &[(f64, f64, String)], size: f64, font_name: &str, font: Object, enc: &FontText, thai: bool) -> (Vec<u8>, Dict, Option<char>) {
     let mut fonts = Dict::new();
@@ -1084,7 +1096,8 @@ fn rich_field_appearance(
     // Thai (its shaped face) and the form's own composite font (CJK forms). Anywhere else the
     // plain value would show the same `?` and lose the formatting too, so the rich value is drawn
     // with `?` for it and the character is reported, as the plain value's would be.
-    let undrawable = text.chars().any(|c| pdfcraft_fonts::first_undrawable(c.encode_utf8(&mut [0; 4])).is_some());
+    let undrawable =
+        text.chars().any(|c| !shaped_text::is_fallback_symbol(c) && pdfcraft_fonts::first_undrawable(c.encode_utf8(&mut [0; 4])).is_some());
     if undrawable && (text.chars().any(shaped_text::is_thai) || matches!(dr_font(doc, &da.font), Some((_, FontText::Unicode(_))))) {
         return None;
     }
@@ -1125,7 +1138,14 @@ enum RunFont {
 }
 
 impl RunFont {
+    /// The width of `s` as it is drawn: its fallback symbols from the symbol faces (#10), the
+    /// rest in this font.
     fn width(&self, s: &str, size: f64) -> f64 {
+        shaped_text::fallback_width(s, size, |s, size| self.own_width(s, size))
+    }
+
+    /// The width of `s` in this font alone.
+    fn own_width(&self, s: &str, size: f64) -> f64 {
         match self {
             RunFont::Standard(f) => f.text_width(s, size),
             RunFont::Form { text, .. } => text.width(&spaces_as(text, s), size),
@@ -1201,7 +1221,9 @@ fn run_font(doc: &Document, faces: &[(String, String, bool, bool)], style: &Styl
         let want = family_key(face.as_str());
         let (resource, ..) = faces.iter().find(|(_, family, bold, italic)| *family == want && *bold == style.bold && *italic == style.italic)?;
         let (object, font) = dr_font(doc, resource)?;
-        font.draws(&spaces_as(&font, &text.replace('\n', " "))).then(|| RunFont::Form { resource: resource.clone(), object, text: font })
+        // Fallback symbols are drawn from the symbol faces, whatever font the run is in.
+        let own: String = text.chars().filter(|c| !shaped_text::is_fallback_symbol(*c)).collect();
+        font.draws(&spaces_as(&font, &own.replace('\n', " "))).then(|| RunFont::Form { resource: resource.clone(), object, text: font })
     });
     form.unwrap_or(RunFont::Standard(style.font()))
 }
@@ -1301,9 +1323,9 @@ fn rich_appearance(doc: &Document, rich: &RichValue, frame: &str, b: Box2, multi
         })
         .collect();
     let runs = || rich.paragraphs.iter().zip(&font_of).flat_map(|(p, f)| p.spans.iter().zip(f));
-    let undrawn = runs()
-        .filter(|(_, f)| matches!(fonts.get(**f), Some(RunFont::Standard(_))))
-        .find_map(|(s, _)| pdfcraft_fonts::first_undrawable(&s.text.replace('\n', " ")));
+    let undrawn = runs().filter(|(_, f)| matches!(fonts.get(**f), Some(RunFont::Standard(_)))).find_map(|(s, _)| {
+        pdfcraft_fonts::first_undrawable(&s.text.chars().filter(|c| !shaped_text::is_fallback_symbol(*c)).collect::<String>().replace('\n', " "))
+    });
     let inner_w = (b.width - 2.0 * b.pad).max(1.0);
     let inner_h = (b.height - 2.0 * b.pad).max(1.0);
     // Runs without a size of their own (0, automatic) take one that fits the plain text in the
@@ -1314,9 +1336,36 @@ fn rich_appearance(doc: &Document, rich: &RichValue, frame: &str, b: Box2, multi
     };
     let size_of = |s: &Style| if s.size > 0.0 { s.size } else { auto };
     let lines = rich_lines(rich, &fonts, &font_of, &size_of, inner_w, multiline);
+    let mut resources = Dict::new();
+    // Each run's pieces: its fallback symbols as glyphs of the symbol faces' Type 3 fonts (#10),
+    // the rest in the run's font. Symbols whose outlines can't be read are left to the run's font,
+    // which draws `?` for them.
+    let own = |t: &String| vec![shaped_text::Piece::Latin(t.clone())];
+    let mut pieces: Vec<Vec<Vec<shaped_text::Piece>>> = lines
+        .iter()
+        .map(|l| {
+            l.runs
+                .iter()
+                .map(|(_, _, t)| if shaped_text::has_fallback(t) { shaped_text::fallback_pieces(t).unwrap_or_else(|_| own(t)) } else { own(t) })
+                .collect()
+        })
+        .collect();
+    let shaped = match ShapedFonts::new(
+        shaped_text::clusters(pieces.iter().flatten().map(Vec::as_slice)),
+        shaped_glyph_of,
+        &Dict::new(),
+        &mut resources,
+        "PCSy",
+        &mut |o| o,
+    ) {
+        Ok(shaped) => shaped,
+        Err(_) => {
+            pieces = lines.iter().map(|l| l.runs.iter().map(|(_, _, t)| own(t)).collect()).collect();
+            ShapedFonts::default()
+        }
+    };
     let mut body: Vec<u8> = Vec::new();
     let mut underlines = String::new();
-    let mut resources = Dict::new();
     let mut overflow = None;
     let mut y = if multiline {
         b.height - b.pad - 0.85 * lines.first().map_or(auto, |l| l.size)
@@ -1348,7 +1397,8 @@ fn rich_appearance(doc: &Document, rich: &RichValue, frame: &str, b: Box2, multi
             rich::Align::Center => b.pad + (inner_w - line.width) / 2.0,
             rich::Align::Right => b.width - b.pad - line.width,
         };
-        for (f, style, text) in &line.runs {
+        let mut current = None;
+        for ((f, style, text), run_pieces) in line.runs.iter().zip(pieces.get(i).map_or(&[][..], Vec::as_slice)) {
             let Some(font) = fonts.get(*f) else { continue };
             let size = size_of(style);
             let (resource, object) = font.resource();
@@ -1357,15 +1407,25 @@ fn rich_appearance(doc: &Document, rich: &RichValue, frame: &str, b: Box2, multi
             }
             let [r, g, bl] = style.color;
             let rgb = format!("{} {} {} rg", n(r), n(g), n(bl));
-            body.extend_from_slice(format!("/{resource} {} Tf\n{rgb}\n1 0 0 1 {} {} Tm\n", n(size), n(x), n(y)).as_bytes());
-            // The font's own codes (WinAnsi bytes for a standard font), not UTF-8.
-            body.extend(literal(&font.encode(text)));
-            body.extend_from_slice(b" Tj\n");
+            body.extend_from_slice(format!("{rgb}\n").as_bytes());
+            let start = x;
+            for piece in run_pieces {
+                match piece {
+                    shaped_text::Piece::Latin(t) => {
+                        body.extend_from_slice(format!("/{resource} {} Tf\n1 0 0 1 {} {} Tm\n", n(size), n(x), n(y)).as_bytes());
+                        // The font's own codes (WinAnsi bytes for a standard font), not UTF-8.
+                        body.extend(literal(&font.encode(t)));
+                        body.extend_from_slice(b" Tj\n");
+                        x += font.own_width(t, size);
+                        current = None;
+                    }
+                    shaped_text::Piece::Shaped(clusters) => x = shaped.show(&mut body, clusters, x, y, size, 0.0, 0.0, &mut current),
+                }
+            }
             if style.underline {
                 let ink = font.width(text.trim_end_matches(' '), size);
-                underlines.push_str(&format!("{rgb}\n{} {} {} {} re f\n", n(x), n(y - 0.12 * size), n(ink), n((0.05 * size).max(0.5))));
+                underlines.push_str(&format!("{rgb}\n{} {} {} {} re f\n", n(start), n(y - 0.12 * size), n(ink), n((0.05 * size).max(0.5))));
             }
-            x += font.width(text, size);
         }
     }
     if multiline && room < lines.len() {

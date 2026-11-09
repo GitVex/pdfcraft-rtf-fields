@@ -59,6 +59,67 @@ pub fn thai_pieces(line: &str) -> Result<Vec<Piece>, GlyphError> {
     runs.into_iter().map(|(thai, s)| if thai { shape_thai(&s).map(Piece::Shaped) } else { Ok(Piece::Latin(s)) }).collect()
 }
 
+/// Whether `c` is a symbol drawn from a craft-fonts symbol face: no standard font has it (it isn't
+/// in WinAnsi) and a symbol face does. Thai is left to [`thai_pieces`].
+pub fn is_fallback_symbol(c: char) -> bool {
+    !is_thai(c) && !crate::win_ansi_encodable(c) && crate::symbol_face_for(c).is_some()
+}
+
+/// Whether `text` has Thai or a [fallback symbol](is_fallback_symbol): characters that
+/// [`fallback_pieces`] draws from a craft-fonts face rather than the text's own font.
+pub fn has_fallback(text: &str) -> bool {
+    text.chars().any(|c| is_thai(c) || is_fallback_symbol(c))
+}
+
+/// `line` split into the pieces its own font draws and those a craft-fonts face draws: Thai runs
+/// shaped ([`thai_pieces`]) and each [fallback symbol](is_fallback_symbol) as a glyph of its symbol
+/// face. [`GlyphError::NoFont`] when there's Thai and this build has no Thai face.
+pub fn fallback_pieces(line: &str) -> Result<Vec<Piece>, GlyphError> {
+    #[derive(PartialEq)]
+    enum Kind {
+        Thai,
+        Symbol,
+        Own,
+    }
+    let kind = |c: char| {
+        if is_thai(c) {
+            Kind::Thai
+        } else if is_fallback_symbol(c) {
+            Kind::Symbol
+        } else {
+            Kind::Own
+        }
+    };
+    let mut runs: Vec<(Kind, String)> = Vec::new();
+    for c in line.chars() {
+        let k = kind(c);
+        match runs.last_mut() {
+            Some((last, s)) if *last == k => s.push(c),
+            _ => runs.push((k, c.to_string())),
+        }
+    }
+    runs.into_iter()
+        .map(|(k, s)| match k {
+            Kind::Thai => shape_thai(&s).map(Piece::Shaped),
+            Kind::Symbol => s.chars().map(|c| crate::symbol_cluster(c).ok_or(GlyphError::Missing)).collect::<Result<_, _>>().map(Piece::Shaped),
+            Kind::Own => Ok(Piece::Latin(s)),
+        })
+        .collect()
+}
+
+/// The width of `text` at `size`, as [`fallback_pieces`] draws it: Thai shaped, fallback symbols
+/// at their own advance, the rest measured by `latin`. Text that can't be split is measured by
+/// `latin` as a whole (drawing then reports why).
+pub fn fallback_width(text: &str, size: f64, latin: impl Fn(&str, f64) -> f64) -> f64 {
+    if !has_fallback(text) {
+        return latin(text, size);
+    }
+    match fallback_pieces(text) {
+        Ok(pieces) => pieces_width(&pieces, size, 0.0, latin),
+        Err(_) => latin(text, size),
+    }
+}
+
 /// The width of `text` at `size`: its Thai shaped, the rest measured by `latin`. Text the Thai
 /// face can't shape is measured by `latin` as a whole (drawing then reports why).
 pub fn thai_width(text: &str, size: f64, latin: impl Fn(&str, f64) -> f64) -> f64 {
@@ -245,7 +306,7 @@ impl ShapedFonts {
 pub fn appearance_lines(lines: &[String], fonts: &mut Dict) -> (Vec<Vec<Piece>>, ShapedFonts) {
     let plain = |l: &String| vec![Piece::Latin(l.clone())];
     let pieces: Vec<Vec<Piece>> =
-        lines.iter().map(|l| if l.chars().any(is_thai) { thai_pieces(l).unwrap_or_else(|_| plain(l)) } else { plain(l) }).collect();
+        lines.iter().map(|l| if has_fallback(l) { fallback_pieces(l).unwrap_or_else(|_| plain(l)) } else { plain(l) }).collect();
     match ShapedFonts::new(clusters(pieces.iter().map(Vec::as_slice)), shaped_glyph, &Dict::new(), fonts, "PCTh", &mut |o| o).map_err(|(e, _)| e) {
         Ok(shaped) => (pieces, shaped),
         Err(_) => (lines.iter().map(plain).collect(), ShapedFonts::default()),
@@ -361,6 +422,7 @@ fn type3_font(clusters: &[&ShapedCluster], outlines: &HashMap<(ShapedScript, u32
                 ShapedScript::Arabic => "Arabic",
                 ShapedScript::Hebrew => "Hebrew",
                 ShapedScript::Thai => "Thai",
+                ShapedScript::Symbol(_) => "Symbols",
             },
             |f| f.family,
         ),

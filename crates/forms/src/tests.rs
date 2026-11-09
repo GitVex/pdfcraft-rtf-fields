@@ -2389,8 +2389,9 @@ fn a_rich_value_changes_size_and_colour_mid_line() {
     );
     let (ap, _) = rich_field(&rv, "small BIG under", false);
     let ap = String::from_utf8_lossy(&ap);
-    assert!(ap.contains("/Helv 18 Tf\n1 0 0 rg") && ap.contains("(BIG) Tj"), "{ap}");
-    assert!(ap.contains("/Helv 12 Tf\n0 0 0 rg") && ap.contains("(small ) Tj"), "{ap}");
+    // Each run sets its colour, then its font (the colour also paints its symbols, #10).
+    assert!(ap.contains("1 0 0 rg\n/Helv 18 Tf") && ap.contains("(BIG) Tj"), "{ap}");
+    assert!(ap.contains("0 0 0 rg\n/Helv 12 Tf") && ap.contains("(small ) Tj"), "{ap}");
     assert!(ap.matches(" re f\n").count() >= 1 && ap.find("(under) Tj") < ap.rfind(" re f"), "an underline after the text: {ap}");
 }
 
@@ -2434,12 +2435,12 @@ fn a_rich_value_that_cannot_be_read_falls_back_to_the_plain_value() {
     assert_eq!(fonts, ["HeBo"]);
 }
 
-/// Issue #3: a character no standard font holds (a ballot box in a character sheet's notes) is
-/// drawn as `?` in the rich value and reported, as the plain value's would be, rather than losing
+/// Issue #3: a character no font here holds (U+E000, private use: in no standard font and no
+/// craft-fonts symbol face) is drawn as `?` in the rich value and reported, as the plain value's would be, rather than losing
 /// the formatting of the rest; Thai, which plain drawing has a face for, is drawn plain.
 #[test]
 fn a_rich_value_draws_characters_without_a_standard_glyph_as_reported_question_marks() {
-    let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Tools</b> \u{2610} Thieves</p></body>"), "Tools \u{2610} Thieves", false);
+    let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Tools</b> \u{e000} Thieves</p></body>"), "Tools \u{e000} Thieves", false);
     assert_eq!(fonts, ["HeBo", "Helv"], "still drawn rich");
     assert!(
         String::from_utf8_lossy(&ap).contains("(Tools) Tj") && String::from_utf8_lossy(&ap).contains("( ? Thieves) Tj"),
@@ -2452,18 +2453,100 @@ fn a_rich_value_draws_characters_without_a_standard_glyph_as_reported_question_m
     let obj = field(&fields(&doc), "rich").obj;
     doc.update_dict(obj, |d| {
         d.set(b"Ff".to_vec(), Object::Int(i64::from(flags::RICH_TEXT)));
-        d.set(b"RV".to_vec(), Object::String(PdfString::text(&format!("{XHTML}<p><b>Tools</b> \u{2610}</p></body>"))));
+        d.set(b"RV".to_vec(), Object::String(PdfString::text(&format!("{XHTML}<p><b>Tools</b> \u{e000}</p></body>"))));
     })
     .unwrap();
     let f = field(&fields(&doc), "rich").clone();
-    let (_, undrawn) = crate::appearance::field_appearance_drawn(&doc, &f, &f.widgets[0], &["Tools \u{2610}".to_string()], false);
-    assert_eq!(undrawn, Some('\u{2610}'));
+    let (_, undrawn) = crate::appearance::field_appearance_drawn(&doc, &f, &f.widgets[0], &["Tools \u{e000}".to_string()], false);
+    assert_eq!(undrawn, Some('\u{e000}'));
     let (_, fonts) = rich_field(
         &format!("{XHTML}<p><b>\u{0e2a}\u{0e27}\u{0e31}\u{0e2a}\u{0e14}\u{0e35}</b></p></body>"),
         "\u{0e2a}\u{0e27}\u{0e31}\u{0e2a}\u{0e14}\u{0e35}",
         false,
     );
     assert!(!fonts.contains(&"HeBo".to_string()), "Thai is drawn plain: {fonts:?}");
+}
+
+/// The Type 3 fonts in an appearance's font resources, with the text their `ToUnicode` maps
+/// (hex, as written), after the appearance's streams were moved into `doc`.
+fn type3_fonts(doc: &Document, res: &Dict) -> Vec<(String, String)> {
+    res.iter()
+        .filter_map(|(name, font)| {
+            let font = doc.resolve(font);
+            let d = font.as_dict()?;
+            (d.name(b"Subtype") == Some(b"Type3")).then_some(())?;
+            let cmap = d.get(b"ToUnicode").map(|t| doc.resolve(t))?;
+            let Object::Stream(s) = &*cmap else { return None };
+            Some((String::from_utf8_lossy(name).into_owned(), String::from_utf8_lossy(&s.decoded().ok()?).into_owned()))
+        })
+        .collect()
+}
+
+/// A field `name` (multiline or not, rich text when `rv` is given) filled with `value` and drawn:
+/// its appearance content, its Type 3 fonts, and what [`field_appearance_drawn`] reports undrawn.
+fn symbol_field(value: &str, rv: Option<&str>) -> (String, Vec<(String, String)>, Option<char>) {
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 600.0, 250.0, 680.0], &NewField::Text { multiline: false }, Some("box")).unwrap();
+    let obj = field(&fields(&doc), "box").obj;
+    doc.update_dict(obj, |d| {
+        d.set(b"DA".to_vec(), PdfString::literal(b"/Helv 12 Tf 0 g".to_vec()));
+        d.set(b"V".to_vec(), Object::String(PdfString::text(value)));
+        if let Some(rv) = rv {
+            d.set(b"Ff".to_vec(), Object::Int(i64::from(flags::RICH_TEXT)));
+            d.set(b"RV".to_vec(), Object::String(PdfString::text(rv)));
+        }
+    })
+    .unwrap();
+    redraw_field(&mut doc, "box").unwrap();
+    let f = field(&fields(&doc), "box").clone();
+    let (_, undrawn) = crate::appearance::field_appearance_drawn(&doc, &f, &f.widgets[0], &[value.to_string()], false);
+    let n = doc.get(f.widgets[0].obj).as_dict().unwrap().get(b"AP").unwrap().as_dict().unwrap().reference(b"N").unwrap();
+    let Object::Stream(s) = &*doc.get(n) else { panic!() };
+    let res = s
+        .dict
+        .get(b"Resources")
+        .map(|r| doc.resolve(r))
+        .and_then(|r| r.as_dict().and_then(|r| r.get(b"Font")).map(|f| doc.resolve(f)))
+        .and_then(|f| f.as_dict().cloned())
+        .unwrap_or_default();
+    (String::from_utf8_lossy(&s.decoded().unwrap()).into_owned(), type3_fonts(&doc, &res), undrawn)
+}
+
+/// Issue #10: symbols no standard font has (☐ ✓ ★) are drawn from the craft-fonts symbol face as
+/// Type 3 glyphs beside the field's font, mapped back to their characters, and not reported. A
+/// build without craft-fonts draws `?` and reports the character, as before.
+#[test]
+fn symbols_are_drawn_from_the_symbol_face_in_plain_values() {
+    let (ap, type3, undrawn) = symbol_field("Dice: \u{2610}\u{2610} \u{2713} done", None);
+    if pdfcraft_fonts::symbol_face_for('\u{2610}').is_none() {
+        assert!(type3.is_empty() && ap.contains("(Dice: ?? ? done) Tj"), "{ap}");
+        assert_eq!(undrawn, Some('\u{2610}'), "without the face it is reported");
+        return;
+    }
+    assert_eq!(undrawn, None, "drawn, so not reported: {ap}");
+    assert_eq!(type3.len(), 1, "one Type 3 font for both symbols: {type3:?}");
+    let (name, cmap) = &type3[0];
+    assert!(cmap.contains("<2610>") && cmap.contains("<2713>"), "copy and search get the characters back: {cmap}");
+    assert!(ap.contains(&format!("/{name} 12 Tf")) && ap.contains("(Dice: ) Tj") && ap.contains("( done) Tj"), "{ap}");
+    assert!(!ap.contains('?'), "no ? drawn: {ap}");
+}
+
+/// Issue #10: in a rich value a symbol takes its run's size and colour, inline with the run.
+#[test]
+fn symbols_are_drawn_from_the_symbol_face_in_rich_values() {
+    let rv = format!("{XHTML}<p><b>Tools</b> <span style=\"color:#ff0000;font-size:16pt\">\u{2610}</span> Thieves</p></body>");
+    let (ap, type3, undrawn) = symbol_field("Tools \u{2610} Thieves", Some(&rv));
+    if pdfcraft_fonts::symbol_face_for('\u{2610}').is_none() {
+        assert!(type3.is_empty() && ap.contains("(?) Tj"), "{ap}");
+        assert_eq!(undrawn, Some('\u{2610}'));
+        return;
+    }
+    assert_eq!(undrawn, None, "{ap}");
+    let (name, cmap) = type3.first().unwrap_or_else(|| panic!("a Type 3 font: {ap}"));
+    assert!(cmap.contains("<2610>"), "{cmap}");
+    let at = ap.find(&format!("/{name} 16 Tf")).unwrap_or_else(|| panic!("the symbol at its run's size: {ap}"));
+    assert!(ap[..at].trim_end().ends_with("1 0 0 rg"), "in its run's colour: {ap}");
+    assert!(ap.contains("/HeBo 12 Tf") && ap.contains("(Tools) Tj") && ap.contains("( Thieves) Tj"), "the rest stays rich: {ap}");
 }
 
 fn runs(parts: &[(&str, bool, bool)]) -> FieldValue {
