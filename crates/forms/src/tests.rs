@@ -2441,6 +2441,93 @@ fn a_rich_value_draws_characters_without_a_standard_glyph_as_reported_question_m
     assert!(!fonts.contains(&"HeBo".to_string()), "Thai is drawn plain: {fonts:?}");
 }
 
+fn runs(parts: &[(&str, bool, bool)]) -> FieldValue {
+    use crate::rich::{Family, Paragraph, RichValue, Span, Style};
+    let style = |bold, italic| Style { family: Family::Helvetica, bold, italic, size: 10.0, color: [0.0, 0.0, 1.0], underline: false };
+    let spans = parts.iter().map(|&(text, bold, italic)| Span { text: text.into(), style: style(bold, italic) }).collect();
+    FieldValue::Rich(RichValue { paragraphs: vec![Paragraph { align: None, spans }] })
+}
+
+/// Issue #4: formatted text written to a text field gives it the plain text as `/V`, the
+/// formatting as `/RV` (reading back as the same runs) and the rich text flag, and draws it rich.
+#[test]
+fn formatted_text_is_written_as_v_rv_and_the_rich_text_flag() {
+    let mut doc = fixture();
+    let value = runs(&[("Plain ", false, false), ("bold", true, false), (" & italic", false, true)]);
+    set_value(&mut doc, "notes", &value).unwrap();
+    let doc = reopen(&doc);
+    let f = field(&fields(&doc), "notes").clone();
+    assert_eq!(f.value, ["Plain bold & italic"]);
+    assert!(f.has(flags::RICH_TEXT) && f.has(flags::MULTILINE), "the rich text flag is added to the field's own: {}", f.flags);
+    let d = doc.get(f.obj).as_dict().cloned().unwrap();
+    let rv = d.get(b"RV").and_then(|v| v.as_string()).map(PdfString::to_text).unwrap();
+    let FieldValue::Rich(written) = &value else { panic!("a rich value") };
+    assert_eq!(crate::rich::parse(&rv, None, crate::rich::Style::of_da(&f.da)).as_ref(), Some(written), "{rv}");
+    let a = ap(&doc, &f.widgets[0]);
+    assert!(a.contains("/HeBo 10 Tf") && a.contains("/HeOb 10 Tf") && a.contains("( & italic) Tj"), "drawn rich: {a}");
+    // A plain value written later replaces it: /RV goes, so it can't contradict /V.
+    let mut doc = doc;
+    set_value(&mut doc, "notes", &FieldValue::Text("plain now".into())).unwrap();
+    assert!(!doc.get(f.obj).as_dict().unwrap().contains(b"RV"));
+}
+
+/// Issue #4: formatted text is refused, with a reason, by fields that can't hold it, and the
+/// field is left as it was.
+#[test]
+fn formatted_text_is_refused_where_it_cannot_be_kept() {
+    let value = runs(&[("12345", true, false)]);
+    for (name, why) in [("zip", "comb"), ("pin", "password"), ("agree", "not a text field"), ("country", "not a text field")] {
+        let mut doc = fixture();
+        let err = set_value(&mut doc, name, &value).unwrap_err().to_string();
+        assert!(err.contains(why), "{name}: {err}");
+        assert!(!doc.get(field(&fields(&doc), name).obj).as_dict().unwrap().contains(b"RV"), "{name}");
+    }
+    let mut doc = fixture();
+    let err = set_value(&mut doc, "notes", &runs(&[("  ", true, false)])).unwrap_err().to_string();
+    assert!(err.contains("has no text"), "{err}");
+    // A Keystroke script that changes the text (to upper case here) leaves nothing to format.
+    struct Upper;
+    impl Scripts for Upper {
+        fn run(&mut self, _: FieldEvent, _: &str, _: &Field, value: &str, _: &[Field]) -> ScriptResult {
+            ScriptResult { rc: true, value: value.to_uppercase(), value_set: true, changes: Vec::new(), message: None }
+        }
+    }
+    let mut doc = fixture();
+    let notes = field(&fields(&doc), "notes").obj;
+    doc.update_dict(notes, |d| {
+        let mut k = Dict::new();
+        k.set(b"S".to_vec(), Object::name("JavaScript"));
+        k.set(b"JS".to_vec(), Object::String(PdfString::text("event.value = event.value.toUpperCase();")));
+        let mut aa = Dict::new();
+        aa.set(b"K".to_vec(), Object::Dict(k));
+        d.set(b"AA".to_vec(), Object::Dict(aa));
+    })
+    .unwrap();
+    let err = set_value_with(&mut doc, "notes", &runs(&[("quiet", false, true)]), &mut Upper).unwrap_err().to_string();
+    assert!(err.contains("scripts changed the text to \"QUIET\""), "{err}");
+}
+
+/// Issue #4: fields that repeat a name (§12.7.3.1) all take the formatted text, as one field.
+#[test]
+fn fields_sharing_a_name_all_take_formatted_text() {
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R 6 0 R] >>".into(),
+        "<< /Fields [5 0 R 6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 7 0 R >> >> >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Client) /Rect [50 700 250 720] /P 3 0 R >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Client) /Rect [50 600 250 620] /P 3 0 R >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
+    ];
+    let mut doc = document(&objs);
+    set_value(&mut doc, "Client", &runs(&[("Ada ", false, false), ("Lovelace", true, false)])).unwrap();
+    let doc = reopen(&doc);
+    for f in fields(&doc).iter().filter(|f| f.name == "Client") {
+        assert!(f.has(flags::RICH_TEXT) && doc.get(f.obj).as_dict().unwrap().contains(b"RV"), "field {}", f.obj.num);
+        assert!(ap(&doc, &f.widgets[0]).contains("/HeBo 10 Tf"), "field {} is drawn rich", f.obj.num);
+    }
+}
+
 /// Issue #1: a `/DA` that already names a bold or italic standard font, by resource or base font
 /// name, reads back as that font rather than as Helvetica; any other font still reads as Helvetica.
 #[test]

@@ -104,6 +104,7 @@ pub use pdfcraft_forms::{
     FieldKind as FormFieldKind, FieldProps, FieldValue, Look as FieldLook, LookPatch as FieldLookPatch, NewField, TabOrder, Trigger as FieldTrigger,
     Widget as FormWidget, af as form_scripts, appearance as form_appearance, appearance::auto_text_size_by as field_auto_text_size_by,
     appearance::comb_auto_text_size as field_comb_auto_text_size, calculations_changed as form_calculations_changed, flags as field_flags,
+    rich as form_rich,
 };
 
 pub use pdfcraft_a11y as a11y;

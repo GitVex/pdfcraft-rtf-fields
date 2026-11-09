@@ -8,12 +8,12 @@
 //!   the states their appearances already define.
 //! - [`reset`]: Acrobat's Clear form (back to `/DV`).
 //! - [`table`]: a table of text fields, laid out and named before any of it is added.
-//! - [`rich`]: rich text values (`/RV`), drawn in a rich text field's appearance. `/RV` is kept
-//!   while its field's value is unchanged, and removed when a new value is set so it can't
-//!   contradict `/V`.
+//! - [`rich`]: rich text values (`/RV`), drawn in a rich text field's appearance and written with
+//!   [`FieldValue::Rich`]. `/RV` is kept while its field's value is unchanged, and removed when a
+//!   new plain value is set so it can't contradict `/V`.
 //!
-//! Not yet: JavaScript actions (format, keystroke, validate, calculate — M6.4/M6.5), and writing or
-//! editing rich text values.
+//! Not yet: JavaScript actions (format, keystroke, validate, calculate — M6.4/M6.5), and editing
+//! rich text values in place.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -355,6 +355,9 @@ pub enum FieldValue {
     /// them), which tells apart options that share an export value. Several only for
     /// multi-select lists; `/V` takes them in this order.
     ChoiceIndices(Vec<usize>),
+    /// Text field: formatted text (§12.7.4.3). `/V` takes its plain text, `/RV` the formatting,
+    /// and the field is set to rich text. Comb and password fields can't take it.
+    Rich(rich::RichValue),
 }
 
 // ── reading ─────────────────────────────────────────────────────────────────────────────────
