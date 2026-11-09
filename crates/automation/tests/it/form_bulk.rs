@@ -186,7 +186,7 @@ fn bold_and_italic_field_fonts_through_form_set_props() {
     }
     call(&mut a, json!({"doc": id, "field": "alpha", "appearance": {"font": "times-bold-italic"}}));
     let mut s = Session::new();
-    let reopened = s.open("saved.pdf", None, bytes(&a, id), None).unwrap();
+    let reopened = s.open("saved.pdf", None, std::sync::Arc::new(bytes(&a, id)), None).unwrap();
     assert_eq!(s.get(reopened).unwrap().field_look("alpha").unwrap().font, FieldFont::TimesBoldItalic);
     let err = a.call("form_set_props", &json!({"doc": id, "field": "alpha", "appearance": {"font": "comic"}})).unwrap_err();
     assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("times-bold-italic")), "{err:?}");
