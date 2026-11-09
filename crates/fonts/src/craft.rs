@@ -71,6 +71,12 @@ pub fn ui_thai_fonts() -> Vec<&'static CraftFont> {
     CRAFT_FONTS.iter().filter(|f| f.covers("Thai")).collect()
 }
 
+/// The open Latin faces form fields can use (#7): craft-fonts' Latin manifest, static faces the
+/// asset policy allows, in manifest order. Empty on the web and without craft-fonts.
+pub fn field_fonts() -> &'static [CraftFont] {
+    CRAFT_LATIN_FONTS
+}
+
 /// The `Zsym` craft-fonts faces (Noto Sans Symbols, Noto Sans Symbols 2), in manifest order: the
 /// symbols (☐ ✓ ★ …) no standard font has, drawn beside a field's or text's own font. Empty when
 /// built without craft-fonts.

@@ -24,7 +24,7 @@ pub(crate) fn ensure_form(doc: &mut Document) -> Result<ObjRef, FormError> {
     let mut added = inline_fonts_as_objects(doc, &mut fonts);
     // Acrobat's resource names for the standard fonts its Appearance tab offers.
     for font in [FieldFont::Helvetica, FieldFont::Times, FieldFont::Courier] {
-        added |= add_standard_font(doc, &mut fonts, font);
+        added |= add_form_font(doc, &mut fonts, font)?;
     }
     if added {
         store_form_fonts(doc, &mut af, dr, fonts);
@@ -39,18 +39,30 @@ pub(crate) fn ensure_form_font(doc: &mut Document, font: FieldFont) -> Result<Ob
     let r = ensure_form(doc)?;
     let mut af = doc.get(r).as_dict().cloned().unwrap_or_default();
     let (dr, mut fonts) = form_fonts(doc, &af);
-    if add_standard_font(doc, &mut fonts, font) {
+    if add_form_font(doc, &mut fonts, font)? {
         store_form_fonts(doc, &mut af, dr, fonts);
         doc.set(r, Object::Dict(af));
     }
     Ok(r)
 }
 
-/// Add `font` to a `/DR` font dictionary under its resource name, unless that name is taken.
-/// Whether it was added.
-fn add_standard_font(doc: &mut Document, fonts: &mut Dict, font: FieldFont) -> bool {
+/// Add `font` to a `/DR` font dictionary under its resource name, unless that name is taken: a
+/// standard font as a reference, a craft face embedded whole (once, shared by every field that
+/// uses it). Whether it was added; a craft face that can't be embedded is an error.
+fn add_form_font(doc: &mut Document, fonts: &mut Dict, font: FieldFont) -> Result<bool, FormError> {
+    // A craft face this build doesn't have is refused before anything else (its resource name
+    // would otherwise fall back to Helvetica's and quietly succeed).
+    if matches!(font, FieldFont::Craft(_)) && font.craft_face().is_none() {
+        return Err(FormError::Invalid("this build has no such font".into()));
+    }
     if fonts.contains(font.resource().as_bytes()) {
-        return false;
+        return Ok(false);
+    }
+    if let Some(face) = font.craft_face() {
+        let embedded = pdfcraft_fonts::embedding::embed_win_ansi(doc, face.font.bytes)
+            .map_err(|e| FormError::Invalid(format!("{} can't be embedded: {e}", face.label)))?;
+        fonts.set(font.resource().as_bytes().to_vec(), embedded);
+        return Ok(true);
     }
     let mut f = Dict::new();
     f.set(b"Type".to_vec(), Object::name("Font"));
@@ -59,7 +71,7 @@ fn add_standard_font(doc: &mut Document, fonts: &mut Dict, font: FieldFont) -> b
     f.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
     let r = doc.add(Object::Dict(f));
     fonts.set(font.resource().as_bytes().to_vec(), Object::Ref(r));
-    true
+    Ok(true)
 }
 
 /// The form dictionary's `/DR` and its `/Font` dictionary, resolved (empty where missing).

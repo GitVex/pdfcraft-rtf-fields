@@ -85,8 +85,8 @@ fn look_arg(v: &Value) -> Result<pdfcraft_engine::FieldLookPatch> {
             .transpose()?,
         font: string("font")?
             .map(|s| {
-                FieldFont::ALL.into_iter().find(|f| f.key() == s).ok_or_else(|| {
-                    let known: Vec<&str> = FieldFont::ALL.iter().map(|f| f.key()).collect();
+                FieldFont::all().into_iter().find(|f| f.key() == s).ok_or_else(|| {
+                    let known: Vec<&str> = FieldFont::all().iter().map(|f| f.key()).collect();
                     bad(format!("unknown font {s:?} ({})", known.join(", ")))
                 })
             })

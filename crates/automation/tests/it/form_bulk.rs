@@ -228,3 +228,30 @@ fn formatted_text_through_form_fill() {
     assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("both values and rich")), "{err:?}");
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Issue #7: `form_set_props` takes the craft-fonts faces this build has by name; the field keeps
+/// the font through save and reopen. Without craft-fonts the name is refused, listing the fonts
+/// this build has.
+#[test]
+fn craft_field_fonts_through_form_set_props() {
+    let (mut a, id, dir) = setup("craft-font");
+    let carlito = FieldFont::all().into_iter().find(|f| f.key() == "carlito-bold");
+    let args = json!({"doc": id, "field": "alpha", "appearance": {"font": "carlito-bold"}});
+    let Some(carlito) = carlito else {
+        let err = a.call("form_set_props", &args).unwrap_err();
+        // The list after the name asked for offers only the standard fonts.
+        let offered = |m: &str| m.split_once('(').map(|(_, list)| list.to_string()).unwrap_or_default();
+        assert!(
+            matches!(&err, ToolError::InvalidArgs(m) if offered(m).contains("courier-bold-oblique") && !offered(m).contains("carlito")),
+            "{err:?}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+        return;
+    };
+    call(&mut a, args);
+    tool(&mut a, "doc_save", json!({"doc": id, "path": "saved.pdf"}));
+    let reopened = tool(&mut a, "doc_open", json!({"path": "saved.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(a.session().get(DocId(reopened)).unwrap().field_look("alpha").unwrap().font, carlito);
+    assert_eq!(a.session().get(DocId(reopened)).unwrap().field_look("beta").unwrap().font, FieldFont::Times, "only the field asked");
+    std::fs::remove_dir_all(dir).ok();
+}

@@ -168,7 +168,8 @@ impl BorderStyle {
     }
 }
 
-/// A field's font: one of the standard 14 Latin fonts (§9.6.2.2), which need no embedding.
+/// A field's font: one of the standard 14 Latin fonts (§9.6.2.2), which need no embedding, or a
+/// craft-fonts Latin face (#7), embedded whole in the form's `/DR` when a field is given it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldFont {
     Helvetica,
@@ -183,6 +184,8 @@ pub enum FieldFont {
     CourierBold,
     CourierOblique,
     CourierBoldOblique,
+    /// The `n`th face of [`pdfcraft_fonts::embedding::field_faces`].
+    Craft(u16),
 }
 
 impl FieldFont {
@@ -201,9 +204,24 @@ impl FieldFont {
         FieldFont::CourierBoldOblique,
     ];
 
-    /// The `/DR` resource name, as Acrobat names the standard fonts.
+    /// Every font a field can have: the standard ones, then the craft-fonts faces this build has.
+    pub fn all() -> Vec<FieldFont> {
+        let craft = (0..pdfcraft_fonts::embedding::field_faces().len()).filter_map(|i| u16::try_from(i).ok()).map(FieldFont::Craft);
+        FieldFont::ALL.into_iter().chain(craft).collect()
+    }
+
+    /// The craft-fonts face this is, if it is one this build has.
+    pub(crate) fn craft_face(self) -> Option<&'static pdfcraft_fonts::embedding::FieldFace> {
+        match self {
+            FieldFont::Craft(n) => pdfcraft_fonts::embedding::field_faces().get(usize::from(n)),
+            _ => None,
+        }
+    }
+
+    /// The `/DR` resource name: Acrobat's for the standard fonts, a craft face's PostScript name.
     pub(crate) fn resource(self) -> &'static str {
         match self {
+            FieldFont::Craft(_) => self.craft_face().map_or("Helv", |f| f.postscript.as_str()),
             FieldFont::Helvetica => "Helv",
             FieldFont::HelveticaBold => "HeBo",
             FieldFont::HelveticaOblique => "HeOb",
@@ -222,6 +240,7 @@ impl FieldFont {
     /// The font's `/BaseFont` (§9.6.2.2).
     pub(crate) fn base_font(self) -> &'static str {
         match self {
+            FieldFont::Craft(_) => self.craft_face().map_or("Helvetica", |f| f.postscript.as_str()),
             FieldFont::Helvetica => "Helvetica",
             FieldFont::HelveticaBold => "Helvetica-Bold",
             FieldFont::HelveticaOblique => "Helvetica-Oblique",
@@ -240,12 +259,13 @@ impl FieldFont {
     /// The font a `/DA` names, by its resource name or its base font name; `None` for any other
     /// font (an embedded or custom one).
     pub fn from_resource(name: &str) -> Option<FieldFont> {
-        FieldFont::ALL.into_iter().find(|f| f.resource() == name || f.base_font() == name)
+        FieldFont::all().into_iter().find(|f| f.resource() == name || f.base_font() == name)
     }
 
     /// The name automation tools take: `helvetica`, `times-bold-italic` and so on.
     pub fn key(self) -> &'static str {
         match self {
+            FieldFont::Craft(_) => self.craft_face().map_or("helvetica", |f| f.key.as_str()),
             FieldFont::Helvetica => "helvetica",
             FieldFont::HelveticaBold => "helvetica-bold",
             FieldFont::HelveticaOblique => "helvetica-oblique",
@@ -263,6 +283,7 @@ impl FieldFont {
 
     pub fn label(self) -> &'static str {
         match self {
+            FieldFont::Craft(_) => self.craft_face().map_or("Helvetica", |f| f.label.as_str()),
             FieldFont::Helvetica => "Helvetica",
             FieldFont::HelveticaBold => "Helvetica Bold",
             FieldFont::HelveticaOblique => "Helvetica Oblique",

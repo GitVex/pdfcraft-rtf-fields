@@ -2759,6 +2759,73 @@ fn a_bold_run_without_a_bold_form_font_keeps_its_weight() {
     assert!(ap.contains("/ABCDEF+Calibri-BoldItalic 8 Tf") && ap.contains("/HeBo 8 Tf"), "a subset's tag is not part of its name: {ap}");
 }
 
+/// The craft-fonts face with automation key `key`, as a field font, if this build has it.
+fn craft_font(key: &str) -> Option<FieldFont> {
+    FieldFont::all().into_iter().find(|f| matches!(f, FieldFont::Craft(_)) && f.key() == key)
+}
+
+/// Issue #7: a craft-fonts face chosen for a field is embedded whole in `/DR` as a simple
+/// TrueType font (`/FontFile2`, WinAnsi `/Widths`), named by `/DA`, drawn in the appearance and
+/// read back as itself; two fields that use it share one embedded program. Without craft-fonts
+/// only the standard fonts are offered.
+#[test]
+fn a_craft_font_is_embedded_once_and_round_trips_as_a_field_font() {
+    let Some(carlito) = craft_font("carlito-bold") else {
+        assert_eq!(FieldFont::all(), FieldFont::ALL.to_vec(), "no craft faces without craft-fonts");
+        return;
+    };
+    assert_eq!((carlito.label(), carlito.resource()), ("Carlito Bold", "Carlito-Bold"));
+    let mut doc = one_page();
+    for (name, y) in [("a", 700.0), ("b", 650.0)] {
+        add_field(&mut doc, 0, [50.0, y, 250.0, y + 20.0], &NewField::Text { multiline: false }, Some(name)).unwrap();
+        set_value(&mut doc, name, &FieldValue::Text("Ada".into())).unwrap();
+        let f = field(&fields(&doc), name).clone();
+        let new = Look { font: carlito, ..look(&doc, &f) };
+        set_props(&mut doc, name, &FieldProps { look: Some(new), font_size: Some(12.0), ..FieldProps::default() }).unwrap();
+    }
+    let doc = reopen(&doc);
+    for name in ["a", "b"] {
+        let f = field(&fields(&doc), name).clone();
+        assert_eq!(look(&doc, &f).font, carlito, "{name} reads back as Carlito Bold");
+        let a = ap(&doc, &f.widgets[0]);
+        assert!(a.contains("/Carlito-Bold 12 Tf") && a.contains("(Ada) Tj"), "{name}: {a}");
+    }
+    let root = doc.root().unwrap();
+    let af = doc.resolve(doc.get(root).as_dict().unwrap().get(b"AcroForm").unwrap());
+    let dr = doc.resolve(af.as_dict().unwrap().get(b"DR").unwrap());
+    let fonts = doc.resolve(dr.as_dict().unwrap().get(b"Font").unwrap());
+    let font = doc.resolve(fonts.as_dict().unwrap().get(b"Carlito-Bold").unwrap());
+    let font = font.as_dict().unwrap();
+    assert_eq!(
+        (font.name(b"Subtype"), font.name(b"Encoding"), font.name(b"BaseFont")),
+        (Some(&b"TrueType"[..]), Some(&b"WinAnsiEncoding"[..]), Some(&b"Carlito-Bold"[..]))
+    );
+    let widths = font.get(b"Widths").and_then(Object::as_array).unwrap();
+    assert_eq!(widths.len(), 224, "codes 32 to 255");
+    assert!(widths.get(usize::from(b'A' - 32)).and_then(Object::as_f64).is_some_and(|w| w > 0.0));
+    let descriptor = doc.resolve(font.get(b"FontDescriptor").unwrap());
+    let program = descriptor.as_dict().unwrap().reference(b"FontFile2").expect("the whole program is embedded");
+    let programs = doc
+        .object_numbers()
+        .into_iter()
+        .filter(|&n| matches!(&*doc.get(ObjRef::new(n, 0)), Object::Stream(s) if s.dict.contains(b"Length1")))
+        .count();
+    assert_eq!(programs, 1, "both fields share one embedded program ({program:?})");
+}
+
+/// Issue #7: a craft face this build doesn't have is refused, and the field is left as it was.
+#[test]
+fn an_unknown_craft_font_is_refused() {
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("a")).unwrap();
+    let f = field(&fields(&doc), "a").clone();
+    let before = f.da.clone();
+    let new = Look { font: FieldFont::Craft(u16::MAX), ..look(&doc, &f) };
+    let err = set_props(&mut doc, "a", &FieldProps { look: Some(new), ..FieldProps::default() }).unwrap_err().to_string();
+    assert!(err.contains("no such font"), "{err}");
+    assert_eq!(field(&fields(&doc), "a").da, before);
+}
+
 /// Issue #1: a `/DA` that already names a bold or italic standard font, by resource or base font
 /// name, reads back as that font rather than as Helvetica; any other font still reads as Helvetica.
 #[test]

@@ -88,7 +88,7 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
                     if let Some(l) = d.look.as_mut() {
                         ui.label(tl!("Font:"));
                         craft_ui::ComboBox::from_id_salt("field-font").selected_text(l.font.label()).show_ui(ui, |ui| {
-                            for f in FieldFont::ALL {
+                            for f in FieldFont::all() {
                                 ui.selectable_value(&mut l.font, f, f.label());
                             }
                         });

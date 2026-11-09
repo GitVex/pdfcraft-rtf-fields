@@ -5,6 +5,12 @@
 //! limits (Cloudflare Pages: 25 MiB per file). Native builds also read the optional
 //! `fonts/simplified-chinese-manifest.txt` (LXGW WenKai Lite); it is never embedded on wasm.
 //! `CRAFT_FONTS_REQUIRED` makes both the checkout and that native manifest required.
+//!
+//! Native builds also embed the optional `fonts/latin-manifest.txt` as `CRAFT_LATIN_FONTS` (#7):
+//! open Latin faces for form fields (Carlito, Caladea, Liberation…). Only static faces PdfCraft
+//! may embed in a PDF are kept: variable fonts and the families the asset policy excludes
+//! (`embedding::validate_document_input`) are left out here, so they cost no binary size. It is
+//! a separate list, so code that looks through `CRAFT_FONTS` by script never sees these faces.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -27,6 +33,20 @@ fn main() {
         }
     } else if required {
         println!("cargo::error=CRAFT_FONTS_REQUIRED is set but CRAFT_FONTS_DIR is missing");
+    }
+    src.push_str("];\n");
+    src.push_str("pub static CRAFT_LATIN_FONTS: &[CraftFont] = &[\n");
+    let wasm = std::env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|a| a == "wasm32");
+    if let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from).filter(|_| !wasm) {
+        let latin = dir.join("fonts/latin-manifest.txt");
+        println!("cargo::rerun-if-changed={}", latin.display());
+        if latin.is_file() {
+            match latin_manifest(&dir, &latin) {
+                Ok(entries) => src.push_str(&entries),
+                // Optional: a broken Latin manifest never takes the main faces with it.
+                Err(e) => println!("cargo::warning=skipping craft-fonts Latin faces: {e}"),
+            }
+        }
     }
     src.push_str("];\n");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap_or_default()).join("craft_fonts.rs");
@@ -58,6 +78,37 @@ fn craft_fonts(dir: &std::path::Path, required: bool) -> Result<String, String> 
             Err(e) if required => return Err(format!("{}: {e}", chinese.display())),
             Err(e) => println!("cargo::warning=skipping optional Chinese fonts: {}: {e}", chinese.display()),
         }
+    }
+    Ok(out)
+}
+
+/// The families the asset policy excludes from document fonts, by the key
+/// `embedding::face_key` makes (letters and digits, lower case): kept in step with
+/// `embedding::validate_document_input`, which still checks every face it embeds.
+const EXCLUDED_FAMILIES: [&str; 5] = ["sourcehan", "sourceserif", "sourcesans", "notosanscjk", "notoserifcjk"];
+
+/// One `CraftFont { .. }` initialiser per static, embeddable face of the Latin manifest.
+fn latin_manifest(dir: &std::path::Path, manifest: &std::path::Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    let mut out = String::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let f: Vec<&str> = line.split(" | ").map(str::trim).collect();
+        let [family, style, file, scripts, ..] = f.as_slice() else {
+            return Err(format!("malformed manifest line: {line}"));
+        };
+        let key: String = family.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+        if style.contains("Variable") || EXCLUDED_FAMILIES.iter().any(|x| key.starts_with(x)) {
+            continue;
+        }
+        let path = dir.join(file).canonicalize().map_err(|e| format!("{file}: {e}"))?;
+        println!("cargo::rerun-if-changed={}", path.display());
+        let scripts: Vec<String> = scripts.split(',').map(|s| format!("{:?}", s.trim())).collect();
+        let _ = writeln!(
+            out,
+            "    CraftFont {{ family: {family:?}, style: {style:?}, scripts: &[{}], bytes: include_bytes!({:?}) }},",
+            scripts.join(", "),
+            path.display().to_string(),
+        );
     }
     Ok(out)
 }
