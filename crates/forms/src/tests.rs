@@ -2281,6 +2281,83 @@ fn appearance_properties_restyle_every_widget() {
     assert!(!a.contains(" re S") && a.contains(" l S"), "underline only: {a}");
 }
 
+fn dr_base_font(doc: &Document, resource: &str) -> Option<String> {
+    let root = doc.root().unwrap();
+    let af = doc.resolve(doc.get(root).as_dict().unwrap().get(b"AcroForm").unwrap());
+    let dr = doc.resolve(af.as_dict().unwrap().get(b"DR").unwrap());
+    let fonts = doc.resolve(dr.as_dict().unwrap().get(b"Font").unwrap());
+    let font = doc.resolve(fonts.as_dict().unwrap().get(resource.as_bytes())?);
+    font.as_dict().unwrap().name(b"BaseFont").map(|b| String::from_utf8_lossy(b).into_owned())
+}
+
+/// Issue #1: every standard 14 Latin font, bold and italic included, can be a field's font. It is
+/// written to `/DA` under Acrobat's resource name, added to `/DR`, drawn in the appearance and
+/// read back as itself.
+#[test]
+fn every_standard_font_round_trips_as_a_field_font() {
+    for font in FieldFont::ALL {
+        let mut doc = one_page();
+        add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("name")).unwrap();
+        set_value(&mut doc, "name", &FieldValue::Text("Ada".into())).unwrap();
+        let f = field(&fields(&doc), "name").clone();
+        let new = Look { font, ..look(&doc, &f) };
+        set_props(&mut doc, "name", &FieldProps { look: Some(new), font_size: Some(12.0), ..FieldProps::default() }).unwrap();
+        let doc = reopen(&doc);
+        let f = field(&fields(&doc), "name").clone();
+        assert_eq!(look(&doc, &f).font, font, "{font:?} reads back as itself");
+        assert_eq!(dr_base_font(&doc, font.resource()).as_deref(), Some(font.base_font()), "{font:?} is in /DR");
+        let a = ap(&doc, &f.widgets[0]);
+        assert!(a.contains(&format!("/{} 12 Tf", font.resource())) && a.contains("(Ada) Tj"), "{font:?}: {a}");
+    }
+    // Choosing a font through an appearance patch (bulk edits, `form_set_props`) adds it too.
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("name")).unwrap();
+    let patch = LookPatch { font: Some(FieldFont::CourierBoldOblique), ..LookPatch::default() };
+    set_props(&mut doc, "name", &FieldProps { appearance: Some(patch), ..FieldProps::default() }).unwrap();
+    let doc = reopen(&doc);
+    assert_eq!(look(&doc, field(&fields(&doc), "name")).font, FieldFont::CourierBoldOblique);
+    assert_eq!(dr_base_font(&doc, "CoBO").as_deref(), Some("Courier-BoldOblique"));
+}
+
+/// Issue #1: a bold field is measured with the bold font's widths, so text set to auto-size
+/// shrinks further to fit than in the regular face (an `m` is 833 units wide in Helvetica, 889 in
+/// Helvetica-Bold).
+#[test]
+fn auto_sized_text_is_measured_in_the_bold_font() {
+    let size_in = |font: FieldFont| {
+        let mut doc = one_page();
+        add_field(&mut doc, 0, [50.0, 700.0, 150.0, 760.0], &NewField::Text { multiline: false }, Some("name")).unwrap();
+        let f = field(&fields(&doc), "name").clone();
+        let new = Look { font, ..look(&doc, &f) };
+        set_props(&mut doc, "name", &FieldProps { look: Some(new), font_size: Some(0.0), ..FieldProps::default() }).unwrap();
+        set_value(&mut doc, "name", &FieldValue::Text("mmmmmmmmmmmmmmmmmmmm".into())).unwrap();
+        let a = ap(&doc, &field(&fields(&doc), "name").widgets[0]);
+        let toks: Vec<&str> = a.split_whitespace().collect();
+        let at = toks.iter().position(|t| *t == "Tf").unwrap_or_else(|| panic!("no Tf in {a}"));
+        toks[at - 1].parse::<f64>().unwrap()
+    };
+    let (regular, bold) = (size_in(FieldFont::Helvetica), size_in(FieldFont::HelveticaBold));
+    assert!(bold < regular, "bold is wider, so it auto-sizes smaller: {bold} vs {regular}");
+}
+
+/// Issue #1: a `/DA` that already names a bold or italic standard font, by resource or base font
+/// name, reads back as that font rather than as Helvetica; any other font still reads as Helvetica.
+#[test]
+fn a_bold_or_italic_da_reads_back_as_its_font() {
+    for (da, font) in [
+        ("/TiBI 12 Tf 0 g", FieldFont::TimesBoldItalic),
+        ("/HeBo 0 Tf 0 g", FieldFont::HelveticaBold),
+        ("/Courier-Oblique 9 Tf 0 g", FieldFont::CourierOblique),
+        ("/MyFont 9 Tf 0 g", FieldFont::Helvetica),
+    ] {
+        let mut doc = one_page();
+        add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("name")).unwrap();
+        let obj = field(&fields(&doc), "name").obj;
+        doc.update_dict(obj, |d| d.set(b"DA".to_vec(), PdfString::literal(da.as_bytes().to_vec()))).unwrap();
+        assert_eq!(look(&doc, field(&fields(&doc), "name")).font, font, "{da}");
+    }
+}
+
 #[test]
 fn tab_order_follows_the_page_setting() {
     let mut doc = one_page();

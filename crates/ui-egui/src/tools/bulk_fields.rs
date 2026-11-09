@@ -121,7 +121,7 @@ impl Draft {
         font.mixed |= fields.iter().any(|f| prepare::da_font(&f.da) != resource);
         let font_label = if font.mixed {
             "Mixed".to_string()
-        } else if ["Helv", "Helvetica", "TiRo", "Times-Roman", "Cour", "Courier"].contains(&resource) {
+        } else if FieldFont::from_resource(resource).is_some() {
             font.value.label().to_string()
         } else {
             "Custom font".to_string()

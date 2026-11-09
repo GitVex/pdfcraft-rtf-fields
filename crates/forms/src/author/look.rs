@@ -168,29 +168,113 @@ impl BorderStyle {
     }
 }
 
+/// A field's font: one of the standard 14 Latin fonts (§9.6.2.2), which need no embedding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldFont {
     Helvetica,
+    HelveticaBold,
+    HelveticaOblique,
+    HelveticaBoldOblique,
     Times,
+    TimesBold,
+    TimesItalic,
+    TimesBoldItalic,
     Courier,
+    CourierBold,
+    CourierOblique,
+    CourierBoldOblique,
 }
 
 impl FieldFont {
-    pub const ALL: [FieldFont; 3] = [FieldFont::Helvetica, FieldFont::Times, FieldFont::Courier];
+    pub const ALL: [FieldFont; 12] = [
+        FieldFont::Helvetica,
+        FieldFont::HelveticaBold,
+        FieldFont::HelveticaOblique,
+        FieldFont::HelveticaBoldOblique,
+        FieldFont::Times,
+        FieldFont::TimesBold,
+        FieldFont::TimesItalic,
+        FieldFont::TimesBoldItalic,
+        FieldFont::Courier,
+        FieldFont::CourierBold,
+        FieldFont::CourierOblique,
+        FieldFont::CourierBoldOblique,
+    ];
 
-    fn resource(self) -> &'static str {
+    /// The `/DR` resource name, as Acrobat names the standard fonts.
+    pub(crate) fn resource(self) -> &'static str {
         match self {
             FieldFont::Helvetica => "Helv",
+            FieldFont::HelveticaBold => "HeBo",
+            FieldFont::HelveticaOblique => "HeOb",
+            FieldFont::HelveticaBoldOblique => "HeBO",
             FieldFont::Times => "TiRo",
+            FieldFont::TimesBold => "TiBo",
+            FieldFont::TimesItalic => "TiIt",
+            FieldFont::TimesBoldItalic => "TiBI",
             FieldFont::Courier => "Cour",
+            FieldFont::CourierBold => "CoBo",
+            FieldFont::CourierOblique => "CoOb",
+            FieldFont::CourierBoldOblique => "CoBO",
+        }
+    }
+
+    /// The font's `/BaseFont` (§9.6.2.2).
+    pub(crate) fn base_font(self) -> &'static str {
+        match self {
+            FieldFont::Helvetica => "Helvetica",
+            FieldFont::HelveticaBold => "Helvetica-Bold",
+            FieldFont::HelveticaOblique => "Helvetica-Oblique",
+            FieldFont::HelveticaBoldOblique => "Helvetica-BoldOblique",
+            FieldFont::Times => "Times-Roman",
+            FieldFont::TimesBold => "Times-Bold",
+            FieldFont::TimesItalic => "Times-Italic",
+            FieldFont::TimesBoldItalic => "Times-BoldItalic",
+            FieldFont::Courier => "Courier",
+            FieldFont::CourierBold => "Courier-Bold",
+            FieldFont::CourierOblique => "Courier-Oblique",
+            FieldFont::CourierBoldOblique => "Courier-BoldOblique",
+        }
+    }
+
+    /// The font a `/DA` names, by its resource name or its base font name; `None` for any other
+    /// font (an embedded or custom one).
+    pub fn from_resource(name: &str) -> Option<FieldFont> {
+        FieldFont::ALL.into_iter().find(|f| f.resource() == name || f.base_font() == name)
+    }
+
+    /// The name automation tools take: `helvetica`, `times-bold-italic` and so on.
+    pub fn key(self) -> &'static str {
+        match self {
+            FieldFont::Helvetica => "helvetica",
+            FieldFont::HelveticaBold => "helvetica-bold",
+            FieldFont::HelveticaOblique => "helvetica-oblique",
+            FieldFont::HelveticaBoldOblique => "helvetica-bold-oblique",
+            FieldFont::Times => "times",
+            FieldFont::TimesBold => "times-bold",
+            FieldFont::TimesItalic => "times-italic",
+            FieldFont::TimesBoldItalic => "times-bold-italic",
+            FieldFont::Courier => "courier",
+            FieldFont::CourierBold => "courier-bold",
+            FieldFont::CourierOblique => "courier-oblique",
+            FieldFont::CourierBoldOblique => "courier-bold-oblique",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             FieldFont::Helvetica => "Helvetica",
+            FieldFont::HelveticaBold => "Helvetica Bold",
+            FieldFont::HelveticaOblique => "Helvetica Oblique",
+            FieldFont::HelveticaBoldOblique => "Helvetica Bold Oblique",
             FieldFont::Times => "Times Roman",
+            FieldFont::TimesBold => "Times Bold",
+            FieldFont::TimesItalic => "Times Italic",
+            FieldFont::TimesBoldItalic => "Times Bold Italic",
             FieldFont::Courier => "Courier",
+            FieldFont::CourierBold => "Courier Bold",
+            FieldFont::CourierOblique => "Courier Oblique",
+            FieldFont::CourierBoldOblique => "Courier Bold Oblique",
         }
     }
 }
@@ -288,11 +372,7 @@ pub fn look(doc: &Document, f: &Field) -> Look {
             _ => BorderStyle::Solid,
         },
         text,
-        font: match parsed.font.as_str() {
-            "TiRo" | "Times-Roman" => FieldFont::Times,
-            "Cour" | "Courier" => FieldFont::Courier,
-            _ => FieldFont::Helvetica,
-        },
+        font: FieldFont::from_resource(&parsed.font).unwrap_or(FieldFont::Helvetica),
     }
 }
 
