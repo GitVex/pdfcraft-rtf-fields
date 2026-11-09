@@ -182,7 +182,7 @@ fn share_value(
                     }
                 }
                 // As in `write_value`: the twin's own rich text stays while its value is unchanged.
-                if twin.value.as_slice() != value {
+                if twin.value.len() != value.len() || twin.value.iter().zip(value).any(|(a, b)| !same_text(a, b)) {
                     d.remove(b"RV");
                 }
             })?;
@@ -292,6 +292,14 @@ pub fn calculations_changed(before: &[Field], after: &[Field]) -> Vec<String> {
         .collect()
 }
 
+/// Whether two values are the same text, whatever their line breaks are written as: `/V` holds
+/// `\r` where Acrobat wrote it, while a literal string's raw line break reads as `\n` and editors
+/// give `\n` back, so an unchanged multiline value keeps its rich text (#2).
+fn same_text(a: &str, b: &str) -> bool {
+    let lines = |s: &str| s.replace("\r\n", "\n").replace('\r', "\n");
+    a == b || lines(a) == lines(b)
+}
+
 pub(crate) fn write_value(doc: &mut Document, f: &Field, value: &FieldValue, scripts: &mut dyn Scripts) -> Result<(), FormError> {
     match (f.kind, value) {
         (FieldKind::Text, FieldValue::Text(t)) => {
@@ -312,7 +320,7 @@ pub(crate) fn write_value(doc: &mut Document, f: &Field, value: &FieldValue, scr
             let shadow = t.is_empty() && crate::author::ancestor_sets(doc, f.obj, b"V");
             // Rich text (`/RV`) another app wrote is kept while the value it formats is unchanged
             // (#2); a new value drops it so it can't contradict `/V`.
-            let unchanged = f.value.first().map_or("", String::as_str) == t.as_str();
+            let unchanged = same_text(f.value.first().map_or("", String::as_str), t);
             doc.update_dict(f.obj, |d| {
                 if t.is_empty() && !shadow {
                     d.remove(b"V");
