@@ -2506,3 +2506,81 @@ fn a_pointer_resting_on_a_list_the_keys_scroll_keeps_the_highlight_on_the_keys()
     h.run_steps(3);
     assert_eq!(value(&h, "country"), ["2900"], "the item End went to, not the one under the pointer");
 }
+
+/// A form with one multiline rich text field, "notes", holding "Sneak Attack" with "Sneak" bold.
+fn rich_form() -> Vec<u8> {
+    let rv = "<body><p><b>Sneak</b> Attack</p></body>";
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 400] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>".to_string(),
+        "<< /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 6 0 R >> >> >>".to_string(),
+        format!(
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /Ff {} /DA (/Helv 12 Tf 0 g) /V (Sneak Attack) /RV ({rv}) /Rect [20 300 280 360] /P 3 0 R >>",
+            pdfcraft_engine::field_flags::RICH_TEXT | pdfcraft_engine::field_flags::MULTILINE
+        ),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    pdf
+}
+
+/// The bold runs of the field "notes"' rich value.
+fn bold_runs(h: &Harness<'static, PdfCraftApp>) -> Vec<String> {
+    let s = h.state();
+    let rich = s.session.get(s.views[0].id).unwrap().field_rich_value("notes").expect("a rich value");
+    rich.paragraphs.iter().flat_map(|p| &p.spans).filter(|s| s.style.bold).map(|s| s.text.clone()).collect()
+}
+
+/// Issue #11: a rich text field opens with its formatting; Bold in the Format text panel applies to
+/// the selection without closing the field, and committing writes the formatting as one undoable
+/// step.
+#[test]
+fn bold_from_the_format_panel_formats_a_rich_fields_selection() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    assert_eq!(bold_runs(&h), ["Sneak"]);
+    click_field(&mut h, "notes", 0);
+    {
+        let fx = h.state().views[0].forms.focus.as_ref().expect("the editor opened");
+        assert!(fx.rich.is_some(), "with its formatting");
+        assert_eq!(fx.text, "Sneak Attack");
+    }
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    // Clicked with the pointer, as a person does: the press takes the keyboard from the field.
+    let bold = h.get_by_label("Bold").rect().center();
+    click_at(&mut h, bold);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_some(), "the panel's click keeps the field open");
+    // A panel control that takes the keyboard (the font size box) keeps it open too.
+    let size = h.get_by_label("Font size").rect().center();
+    click_at(&mut h, size);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_some(), "the font size box takes the keyboard, and the field stays open");
+    // A click on the page away from the field commits it.
+    let below = {
+        let s = h.state();
+        let doc = s.session.get(s.views[0].id).unwrap();
+        let f = doc.form.iter().find(|f| f.name == "notes").unwrap();
+        let r = pdfcraft_ui_egui::forms_ui::field_screen_rect(&s.views[0], &doc.info, f, 0).unwrap();
+        egui::pos2(r.center().x, r.max.y + 60.0)
+    };
+    click_at(&mut h, below);
+    assert!(h.state().views[0].forms.focus.is_none(), "committed");
+    assert_eq!(bold_runs(&h), ["Sneak Attack"], "the whole selection is bold");
+    // One undo step brings the field's own formatting back.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    assert_eq!(bold_runs(&h), ["Sneak"]);
+}

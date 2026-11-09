@@ -1140,6 +1140,15 @@ fn rich_value(doc: &Document, f: &Field, da: &Da, text: &str) -> Option<RichValu
     rich::parse(&rv, ds.as_deref(), base).filter(|r| r.matches(text))
 }
 
+/// A rich text field's current rich value (#11): its `/RV`, read over the style of its first
+/// widget's `/DA` (else the field's) and `/DS`, as its appearance draws it, for an editor to open
+/// with. `None` for a field drawn plain (see [`rich_value`]).
+pub fn field_rich_value(doc: &Document, f: &Field) -> Option<RichValue> {
+    let wd = f.widgets.first().and_then(|w| doc.get(w.obj).as_dict().cloned()).unwrap_or_default();
+    let da = parse_da(wd.get(b"DA").and_then(|o| doc.resolve(o).as_string().map(|s| s.to_text())).as_deref().unwrap_or(&f.da));
+    rich_value(doc, f, &da, f.value.first().map_or("", String::as_str))
+}
+
 /// A rich text field's appearance (#3), when its `/RV` can be drawn: see [`rich_value`] and
 /// [`rich_appearance`]. `None` draws the plain value.
 fn rich_field_appearance(

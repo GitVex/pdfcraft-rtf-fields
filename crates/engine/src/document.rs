@@ -741,6 +741,14 @@ impl Document {
         Some(pdfcraft_forms::look(&e.cos, f))
     }
 
+    /// A rich text field's formatted value, as its appearance draws it, for the field editor to
+    /// open with (#11); `None` for a field drawn plain.
+    pub fn field_rich_value(&self, name: &str) -> Option<pdfcraft_forms::rich::RichValue> {
+        let e = self.editor.as_ref()?;
+        let f = self.form.iter().find(|f| f.name == name)?;
+        pdfcraft_forms::appearance::field_rich_value(&e.cos, f)
+    }
+
     /// A check box's or radio button's mark (Field Properties ▸ Options), `None` for other fields.
     pub fn field_check_style(&self, name: &str) -> Option<CheckStyle> {
         let e = self.editor.as_ref()?;

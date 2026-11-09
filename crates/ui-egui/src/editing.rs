@@ -1329,6 +1329,9 @@ mod revert_draft_tests {
             calendar_text: None,
             list: Default::default(),
             had_focus: false,
+            rich: None,
+            rich_loaded: false,
+            selection: 0..0,
         }
     }
 

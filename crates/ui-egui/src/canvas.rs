@@ -2838,6 +2838,7 @@ fn frame_overlays(ui: &mut egui::Ui, view: &mut DocView, env: &PageEnv<'_>, prim
     if let Some(e) = crate::edit_text_ui::overlay(ui.ctx(), view, info) {
         view.pending_edit = Some(e);
     }
+    crate::forms_ui::load_rich(doc, view, form);
     let text_box = crate::forms_ui::text_box(doc, view, form);
     if let Some(e) = crate::forms_ui::overlay(ui.ctx(), view, info, form, primary_down, text_box.as_ref(), today) {
         view.pending_edit = Some(e);
