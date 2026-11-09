@@ -4,7 +4,8 @@
 //! (background and border colours) and `/BS` (border width and style), inside a `/Tx BMC … EMC`
 //! marked-content block as viewers expect. Supported: single-line, multiline (wrapped), comb,
 //! password, quadding, auto font size (`0 Tf`), combo boxes and list boxes (selection shown), and
-//! rich text values (`/RV`, read by [`crate::rich`]) in their own standard fonts, sizes and colours.
+//! rich text values (`/RV`, read by [`crate::rich`]) in their own sizes and colours, each run in the
+//! form's `/DR` font of the family it names where the form has one, else a standard font.
 //!
 //! The `/DA` font is used when the form's `/DR` defines it as a simple font that can encode the
 //! displayed text (using its own encoding and Differences), or as a composite font with a
@@ -331,6 +332,20 @@ impl FontText {
                 s.chars().map(|c| if c == '\t' { ' ' } else { c }).find(|c| metrics.encode(c.encode_utf8(&mut [0; 4])).is_none())
             }
             Self::Unicode(cmap) => cmap.first_unencodable(s),
+        }
+    }
+
+    /// Whether every character of `s` has a glyph to draw: encodable, and (in a simple font) not
+    /// left out of the font, as a subset leaves glyphs it doesn't use at width 0.
+    fn draws(&self, s: &str) -> bool {
+        match self {
+            Self::Simple(metrics) => s.chars().all(|c| {
+                let c = if c == '\t' { ' ' } else { c };
+                metrics
+                    .encode(c.encode_utf8(&mut [0; 4]))
+                    .is_some_and(|bytes| c.is_whitespace() || metrics.codes(&bytes).iter().all(|&(code, _)| metrics.width(code) > 0.0))
+            }),
+            _ => self.first_unencodable(s).is_none(),
         }
     }
 
@@ -1073,7 +1088,7 @@ fn rich_field_appearance(
     if undrawable && (text.chars().any(shaped_text::is_thai) || matches!(dr_font(doc, &da.font), Some((_, FontText::Unicode(_))))) {
         return None;
     }
-    let drawn = rich_appearance(&rich, frame, b, f.has(flags::MULTILINE));
+    let drawn = rich_appearance(doc, &rich, frame, b, f.has(flags::MULTILINE));
     let mut d = Dict::new();
     d.set(b"Type".to_vec(), Object::name("XObject"));
     d.set(b"Subtype".to_vec(), Object::name("Form"));
@@ -1103,43 +1118,135 @@ struct RichDrawn {
     undrawn: Option<char>,
 }
 
-/// One laid-out line: its runs, how wide it is and its tallest size.
+/// The font a rich run is drawn in: a standard 14 font, or one of the form's own (`/DR`, #9).
+enum RunFont {
+    Standard(pdfcraft_fonts::Std14),
+    Form { resource: String, object: Object, text: FontText },
+}
+
+impl RunFont {
+    fn width(&self, s: &str, size: f64) -> f64 {
+        match self {
+            RunFont::Standard(f) => f.text_width(s, size),
+            RunFont::Form { text, .. } => text.width(&spaces_as(text, s), size),
+        }
+    }
+
+    fn encode(&self, s: &str) -> Vec<u8> {
+        match self {
+            RunFont::Standard(_) => win_ansi(s),
+            RunFont::Form { text, .. } => text.encode(&spaces_as(text, s)),
+        }
+    }
+
+    /// Its resource name in the appearance, and the font object there: a form font as `/DR`
+    /// holds it (never copied or embedded anew), a standard one under Acrobat's name.
+    fn resource(&self) -> (String, Object) {
+        match self {
+            RunFont::Standard(f) => {
+                let mut fd = Dict::new();
+                fd.set(b"Type".to_vec(), Object::name("Font"));
+                fd.set(b"Subtype".to_vec(), Object::name("Type1"));
+                fd.set(b"BaseFont".to_vec(), Object::name(f.base_font()));
+                fd.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+                (crate::FieldFont::from_resource(f.base_font()).map_or("Helv", |f| f.resource()).to_string(), Object::Dict(fd))
+            }
+            RunFont::Form { resource, object, .. } => (resource.clone(), object.clone()),
+        }
+    }
+}
+
+/// `s` with each space character the form font can't encode (a no-break space, `&#160;` in
+/// Acrobat's rich text) as a plain space, which it draws the same.
+fn spaces_as(font: &FontText, s: &str) -> String {
+    s.chars().map(|c| if c.is_whitespace() && c != ' ' && !font.can_encode(c.encode_utf8(&mut [0; 4])) { ' ' } else { c }).collect()
+}
+
+/// A font family name as it compares between a run and a `/BaseFont`: letters and digits only,
+/// lower case, without PostScript's `PS`/`MT` endings (`Times New Roman` is `TimesNewRomanPSMT`).
+fn family_key(name: &str) -> String {
+    let key: String = name.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+    let key = key.strip_suffix("mt").unwrap_or(&key);
+    key.strip_suffix("ps").unwrap_or(key).to_string()
+}
+
+/// The form's `/DR` fonts as faces: resource name, family key, bold, italic, read from each
+/// font's `/BaseFont` (`ABCDEF+Calibri-BoldItalic`, `Arial,Bold`).
+fn form_faces(doc: &Document) -> Vec<(String, String, bool, bool)> {
+    let fonts = acroform(doc).and_then(|af| {
+        let dr = doc.resolve(af.get(b"DR")?);
+        doc.resolve(dr.as_dict()?.get(b"Font")?).as_dict().cloned()
+    });
+    let Some(fonts) = fonts else { return Vec::new() };
+    fonts
+        .iter()
+        .filter_map(|(key, entry)| {
+            let base = doc.resolve(entry).as_dict()?.name(b"BaseFont").map(|b| String::from_utf8_lossy(b).into_owned())?;
+            let base = base.split_once('+').filter(|(tag, _)| tag.len() == 6).map_or(base.as_str(), |(_, rest)| rest).to_string();
+            let (family, style) = base.split_once(['-', ',']).unwrap_or((&base, ""));
+            let style = style.to_ascii_lowercase();
+            let bold = ["bold", "black", "heavy"].iter().any(|w| style.contains(w));
+            let italic = style.contains("italic") || style.contains("oblique");
+            Some((String::from_utf8_lossy(key).into_owned(), family_key(family), bold, italic))
+        })
+        .collect()
+}
+
+/// The font for a run in `style` showing `text`: the form's font of the face it names in that
+/// weight and posture, when the form has one that holds every character of the text; else the
+/// standard 14 font, which keeps the weight and posture (#9: a bold run with only a regular form
+/// font is drawn in Helvetica-Bold, not in the regular face).
+fn run_font(doc: &Document, faces: &[(String, String, bool, bool)], style: &Style, text: &str) -> RunFont {
+    let form = style.face.and_then(|face| {
+        let want = family_key(face.as_str());
+        let (resource, ..) = faces.iter().find(|(_, family, bold, italic)| *family == want && *bold == style.bold && *italic == style.italic)?;
+        let (object, font) = dr_font(doc, resource)?;
+        font.draws(&spaces_as(&font, &text.replace('\n', " "))).then(|| RunFont::Form { resource: resource.clone(), object, text: font })
+    });
+    form.unwrap_or(RunFont::Standard(style.font()))
+}
+
+/// One laid-out line: its runs (font, style, text), how wide it is and its tallest size.
 struct RichLine {
-    runs: Vec<(Style, String)>,
+    runs: Vec<(usize, Style, String)>,
     width: f64,
     size: f64,
     align: Option<rich::Align>,
 }
 
-/// Lines of `rich` at `size_of` each style, wrapped to `room` when `wrap` (a multiline field),
-/// else one line, as a single-line field shows paragraphs and line breaks as spaces.
-fn rich_lines(rich: &RichValue, size_of: &dyn Fn(&Style) -> f64, room: f64, wrap: bool) -> Vec<RichLine> {
+/// Lines of `rich` at `size_of` each style, each span in its font (`fonts`, by `font_of` the
+/// span's paragraph and position), wrapped to `room` when `wrap` (a multiline field), else one
+/// line, as a single-line field shows paragraphs and line breaks as spaces.
+fn rich_lines(rich: &RichValue, fonts: &[RunFont], font_of: &[Vec<usize>], size_of: &dyn Fn(&Style) -> f64, room: f64, wrap: bool) -> Vec<RichLine> {
     let new_line = |align| RichLine { runs: Vec::new(), width: 0.0, size: 0.0, align };
     let mut lines = Vec::new();
     let mut line = new_line(rich.paragraphs.first().and_then(|p| p.align));
     for (i, p) in rich.paragraphs.iter().enumerate() {
+        let span_fonts = font_of.get(i).map_or(&[][..], Vec::as_slice);
         if i > 0 {
             if wrap {
                 lines.push(std::mem::replace(&mut line, new_line(p.align)));
-            } else if let Some(first) = p.spans.first() {
-                line.runs.push((first.style, " ".into()));
+            } else if let (Some(first), Some(&f)) = (p.spans.first(), span_fonts.first()) {
+                line.runs.push((f, first.style, " ".into()));
             }
         }
-        for span in &p.spans {
+        for (span, &f) in p.spans.iter().zip(span_fonts) {
             let size = size_of(&span.style);
-            let font = span.style.font();
+            let Some(font) = fonts.get(f) else { continue };
             for (j, part) in span.text.split('\n').enumerate() {
                 if j > 0 {
                     if wrap {
                         lines.push(std::mem::replace(&mut line, new_line(p.align)));
                     } else {
-                        line.runs.push((span.style, " ".into()));
+                        line.runs.push((f, span.style, " ".into()));
                     }
                 }
                 // Words with the spaces after them, so a line breaks after its spaces.
                 for word in part.split_inclusive(' ') {
-                    let ink = font.text_width(word.trim_end_matches(' '), size);
-                    if wrap && !line.runs.is_empty() && line_ink(&line, size_of) + ink > room + 0.01 {
+                    let ink = font.width(word.trim_end_matches(' '), size);
+                    // The line so far with the spaces it ends in, which come before this word.
+                    let so_far: f64 = line.runs.iter().filter_map(|(f, s, t)| Some(fonts.get(*f)?.width(t, size_of(s)))).sum();
+                    if wrap && !line.runs.is_empty() && so_far + ink > room + 0.01 {
                         lines.push(std::mem::replace(&mut line, new_line(p.align)));
                     }
                     // A wrapped line doesn't start with the spaces that ended the one before.
@@ -1147,8 +1254,8 @@ fn rich_lines(rich: &RichValue, size_of: &dyn Fn(&Style) -> f64, room: f64, wrap
                         continue;
                     }
                     match line.runs.last_mut() {
-                        Some((style, text)) if *style == span.style => text.push_str(word),
-                        _ => line.runs.push((span.style, word.to_string())),
+                        Some((font, style, text)) if *font == f && *style == span.style => text.push_str(word),
+                        _ => line.runs.push((f, span.style, word.to_string())),
                     }
                     line.size = line.size.max(size);
                 }
@@ -1158,42 +1265,58 @@ fn rich_lines(rich: &RichValue, size_of: &dyn Fn(&Style) -> f64, room: f64, wrap
     }
     lines.push(line);
     for l in &mut lines {
-        l.width = line_ink(l, size_of);
+        l.width = line_ink(l, fonts, size_of);
     }
     lines
 }
 
 /// How wide a line's ink is: its runs, without the spaces it ends in.
-fn line_ink(line: &RichLine, size_of: &dyn Fn(&Style) -> f64) -> f64 {
+fn line_ink(line: &RichLine, fonts: &[RunFont], size_of: &dyn Fn(&Style) -> f64) -> f64 {
     let last = line.runs.len().saturating_sub(1);
     line.runs
         .iter()
         .enumerate()
-        .map(|(i, (style, text))| style.font().text_width(if i == last { text.trim_end_matches(' ') } else { text }, size_of(style)))
+        .filter_map(|(i, (f, style, text))| Some(fonts.get(*f)?.width(if i == last { text.trim_end_matches(' ') } else { text }, size_of(style))))
         .sum()
 }
 
 /// Draw `rich` in the box `b` (inside the frame `frame` already drawn), aligned by its `/Q` where
-/// a paragraph doesn't say, on wrapped lines when `multiline`. A character no standard font holds
-/// is drawn and measured as `?`.
-fn rich_appearance(rich: &RichValue, frame: &str, b: Box2, multiline: bool) -> RichDrawn {
-    let runs = || rich.paragraphs.iter().flat_map(|p| &p.spans);
-    let undrawn = runs().find_map(|s| pdfcraft_fonts::first_undrawable(&s.text.replace('\n', " ")));
+/// a paragraph doesn't say, on wrapped lines when `multiline`. Each run is drawn in the form's own
+/// font where it has one for it, else a standard 14 font, in which a character no standard font
+/// holds is drawn and measured as `?`.
+fn rich_appearance(doc: &Document, rich: &RichValue, frame: &str, b: Box2, multiline: bool) -> RichDrawn {
+    let faces = form_faces(doc);
+    let mut fonts: Vec<RunFont> = Vec::new();
+    let font_of: Vec<Vec<usize>> = rich
+        .paragraphs
+        .iter()
+        .map(|p| {
+            p.spans
+                .iter()
+                .map(|s| {
+                    fonts.push(run_font(doc, &faces, &s.style, &s.text));
+                    fonts.len() - 1
+                })
+                .collect()
+        })
+        .collect();
+    let runs = || rich.paragraphs.iter().zip(&font_of).flat_map(|(p, f)| p.spans.iter().zip(f));
+    let undrawn = runs()
+        .filter(|(_, f)| matches!(fonts.get(**f), Some(RunFont::Standard(_))))
+        .find_map(|(s, _)| pdfcraft_fonts::first_undrawable(&s.text.replace('\n', " ")));
     let inner_w = (b.width - 2.0 * b.pad).max(1.0);
     let inner_h = (b.height - 2.0 * b.pad).max(1.0);
     // Runs without a size of their own (0, automatic) take one that fits the plain text in the
     // first run's font, as the plain value would be sized.
-    let auto = if runs().any(|s| s.style.size == 0.0) {
-        let first = runs().next().map(|s| s.style.font()).unwrap_or(pdfcraft_fonts::Std14::Helvetica);
-        auto_text_size(&rich.plain_text(), inner_w, inner_h, multiline, |s, size| first.text_width(s, size))
-    } else {
-        12.0
+    let auto = match runs().find(|(s, _)| s.style.size == 0.0).and(runs().next()).and_then(|(_, f)| fonts.get(*f)) {
+        Some(first) => auto_text_size(&rich.plain_text(), inner_w, inner_h, multiline, |s, size| first.width(s, size)),
+        None => 12.0,
     };
     let size_of = |s: &Style| if s.size > 0.0 { s.size } else { auto };
-    let lines = rich_lines(rich, &size_of, inner_w, multiline);
+    let lines = rich_lines(rich, &fonts, &font_of, &size_of, inner_w, multiline);
     let mut body: Vec<u8> = Vec::new();
     let mut underlines = String::new();
-    let mut fonts = Dict::new();
+    let mut resources = Dict::new();
     let mut overflow = None;
     let mut y = if multiline {
         b.height - b.pad - 0.85 * lines.first().map_or(auto, |l| l.size)
@@ -1225,30 +1348,24 @@ fn rich_appearance(rich: &RichValue, frame: &str, b: Box2, multiline: bool) -> R
             rich::Align::Center => b.pad + (inner_w - line.width) / 2.0,
             rich::Align::Right => b.width - b.pad - line.width,
         };
-        for (style, text) in &line.runs {
+        for (f, style, text) in &line.runs {
+            let Some(font) = fonts.get(*f) else { continue };
             let size = size_of(style);
-            let font = style.font();
-            let resource = crate::FieldFont::from_resource(font.base_font()).map_or("Helv", |f| f.resource());
-            if !fonts.contains(resource.as_bytes()) {
-                let mut fd = Dict::new();
-                fd.set(b"Type".to_vec(), Object::name("Font"));
-                fd.set(b"Subtype".to_vec(), Object::name("Type1"));
-                fd.set(b"BaseFont".to_vec(), Object::name(font.base_font()));
-                fd.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
-                fonts.set(resource.as_bytes().to_vec(), Object::Dict(fd));
+            let (resource, object) = font.resource();
+            if !resources.contains(resource.as_bytes()) {
+                resources.set(resource.as_bytes().to_vec(), object);
             }
             let [r, g, bl] = style.color;
             let rgb = format!("{} {} {} rg", n(r), n(g), n(bl));
             body.extend_from_slice(format!("/{resource} {} Tf\n{rgb}\n1 0 0 1 {} {} Tm\n", n(size), n(x), n(y)).as_bytes());
-            // WinAnsi bytes, not UTF-8: the content is assembled as bytes.
-            body.extend(literal(&win_ansi(text)));
+            // The font's own codes (WinAnsi bytes for a standard font), not UTF-8.
+            body.extend(literal(&font.encode(text)));
             body.extend_from_slice(b" Tj\n");
-            let w = font.text_width(text, size);
             if style.underline {
-                let ink = font.text_width(text.trim_end_matches(' '), size);
+                let ink = font.width(text.trim_end_matches(' '), size);
                 underlines.push_str(&format!("{rgb}\n{} {} {} {} re f\n", n(x), n(y - 0.12 * size), n(ink), n((0.05 * size).max(0.5))));
             }
-            x += w;
+            x += font.width(text, size);
         }
     }
     if multiline && room < lines.len() {
@@ -1259,7 +1376,7 @@ fn rich_appearance(rich: &RichValue, frame: &str, b: Box2, multiline: bool) -> R
         format!("/Tx BMC\nq\n{frame}{} {} {} {} re W n\nBT\n", n(b.bw), n(b.bw), n(b.width - 2.0 * b.bw), n(b.height - 2.0 * b.bw)).into_bytes();
     content.extend(body);
     content.extend_from_slice(format!("ET\n{underlines}Q\nEMC\n").as_bytes());
-    RichDrawn { content, fonts, overflow, undrawn }
+    RichDrawn { content, fonts: resources, overflow, undrawn }
 }
 
 /// On/Off appearances for a check box or radio button that has none (a check mark or a dot,

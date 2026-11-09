@@ -42,10 +42,50 @@ impl Family {
     }
 }
 
+/// A font family name a run asks for that isn't a standard 14 one (`Calibri`, `Times New
+/// Roman`), kept so the form's own font of that name can draw it (#9). Copied with the style, so
+/// it is held inline: names longer than 63 bytes aren't kept, and such runs use [`Family`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Face {
+    len: u8,
+    bytes: [u8; 63],
+}
+
+impl Face {
+    /// The face a family name asks for: `None` for the standard and generic families, which
+    /// [`Family`] covers, and for names too long to keep.
+    pub fn named(name: &str) -> Option<Face> {
+        let name = name.trim().trim_matches(['"', '\'']).trim();
+        let plain: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let standard =
+            ["helvetica", "helv", "times", "timesroman", "tiro", "courier", "cour", "serif", "sansserif", "monospace", "zapfdingbats", "symbol"];
+        if name.is_empty() || name.len() > 63 || standard.contains(&plain.as_str()) {
+            return None;
+        }
+        let mut bytes = [0; 63];
+        bytes.get_mut(..name.len())?.copy_from_slice(name.as_bytes());
+        Some(Face { len: u8::try_from(name.len()).ok()?, bytes })
+    }
+
+    pub fn as_str(&self) -> &str {
+        // Built from a `&str` cut at its own length, so always UTF-8; empty if it somehow isn't.
+        std::str::from_utf8(self.bytes.get(..usize::from(self.len)).unwrap_or_default()).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for Face {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+
 /// A run's look.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Style {
+    /// The standard 14 family drawn when the form has no font for [`Self::face`].
     pub family: Family,
+    /// The font the run names, when it isn't a standard one.
+    pub face: Option<Face>,
     pub bold: bool,
     pub italic: bool,
     /// Points; 0 is automatic (fit to the field), as in a `/DA`.
@@ -82,7 +122,10 @@ impl Style {
                 lower.contains("italic") || lower.contains("oblique"),
             ),
         };
-        Style { family, bold, italic, size, color, underline: false }
+        // `Calibri`, `ABCDEF+Calibri-Bold`, `Arial,Bold`: the family, without subset tag and style.
+        let base = name.split_once('+').filter(|(tag, _)| tag.len() == 6).map_or(name, |(_, rest)| rest);
+        let face = Face::named(base.split(['-', ',']).next().unwrap_or(base));
+        Style { family, face, bold, italic, size, color, underline: false }
     }
 
     /// The style a `/DA` string sets (`/HeBo 12 Tf 1 0 0 rg`): its font's family, weight and
@@ -117,7 +160,10 @@ impl Style {
             let value = value.trim();
             match prop.trim().to_ascii_lowercase().as_str() {
                 "font" => self = self.with_font_shorthand(value),
-                "font-family" => self.family = Family::of_css(value).unwrap_or(self.family),
+                "font-family" => {
+                    self.family = Family::of_css(value).unwrap_or(self.family);
+                    self.face = Face::named(value.split(',').next().unwrap_or(value));
+                }
                 "font-weight" => self.bold = weight_is_bold(value).unwrap_or(self.bold),
                 "font-style" => self.italic = posture_is_italic(value).unwrap_or(self.italic),
                 "font-size" => self.size = css_size(value).unwrap_or(self.size),
@@ -139,10 +185,15 @@ impl Style {
     /// This style as CSS declarations, every property written, so a run reads back the same
     /// whatever the default style is. An automatic size (0) is left out.
     fn css(&self) -> String {
-        let family = match self.family {
+        let standard = match self.family {
             Family::Helvetica => "Helvetica",
             Family::Times => "Times",
             Family::Courier => "Courier",
+        };
+        // The form's font first, then the standard family it falls back to.
+        let family = match self.face {
+            Some(face) => format!("'{}',{standard}", face.as_str().replace(['\'', '"', ';'], "")),
+            None => standard.to_string(),
         };
         let hex = |x: f64| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
         let [r, g, b] = self.color;
@@ -176,8 +227,12 @@ impl Style {
                 family.push(token);
             }
         }
-        if let Some(f) = Family::of_css(&family.join(" ")) {
-            self.family = f;
+        if !family.is_empty() {
+            let list = family.join(" ");
+            if let Some(f) = Family::of_css(&list) {
+                self.family = f;
+            }
+            self.face = Face::named(list.split(',').next().unwrap_or(&list));
         }
         self
     }
@@ -445,7 +500,7 @@ fn text_align(css: &str) -> Option<Align> {
 mod tests {
     use super::*;
 
-    const BASE: Style = Style { family: Family::Helvetica, bold: false, italic: false, size: 12.0, color: [0.0; 3], underline: false };
+    const BASE: Style = Style { family: Family::Helvetica, face: None, bold: false, italic: false, size: 12.0, color: [0.0; 3], underline: false };
 
     fn spans(rich: &RichValue) -> Vec<(&str, bool, bool, f64)> {
         rich.paragraphs.iter().flat_map(|p| &p.spans).map(|s| (s.text.as_str(), s.style.bold, s.style.italic, s.style.size)).collect()
@@ -497,7 +552,7 @@ mod tests {
 
     #[test]
     fn a_written_value_reads_back_as_the_same_runs() {
-        let style = |bold, italic, size, color, underline| Style { family: Family::Times, bold, italic, size, color, underline };
+        let style = |bold, italic, size, color, underline| Style { family: Family::Times, face: None, bold, italic, size, color, underline };
         let rich = RichValue {
             paragraphs: vec![
                 Paragraph {
@@ -524,6 +579,21 @@ mod tests {
         let s = Style::of_da("/TiBI 9 Tf 0 0 1 rg");
         assert_eq!((s.family, s.bold, s.italic, s.size, s.color), (Family::Times, true, true, 9.0, [0.0, 0.0, 1.0]));
         assert_eq!(Style::of_da("/Helv 0 Tf 0 g").size, 0.0, "automatic");
+    }
+
+    #[test]
+    fn a_run_keeps_the_font_it_names_when_it_is_not_a_standard_one() {
+        let rv = "<body><p style=\"font-family:Calibri;font-size:8pt\">a<span style=\"font-family:'Times New Roman'\">b</span><span style=\"font-family:Courier\">c</span></p></body>";
+        let rich = parse(rv, Some("font: Calibri,sans-serif 8.0pt"), BASE).unwrap();
+        let faces: Vec<_> = rich.paragraphs[0].spans.iter().map(|s| (s.style.face.map(|f| f.as_str().to_string()), s.style.family)).collect();
+        assert_eq!(faces, [(Some("Calibri".into()), Family::Helvetica), (Some("Times New Roman".into()), Family::Times), (None, Family::Courier)],);
+        // The face and its standard fallback are both written, so both read back.
+        assert_eq!(parse(&rich.to_xhtml(), None, BASE), Some(rich));
+        let da = Style::of_da("/Calibri 8 Tf 0 g");
+        assert_eq!((da.face.map(|f| f.as_str().to_string()), da.family), (Some("Calibri".into()), Family::Helvetica));
+        assert_eq!(Style::of_font("ABCDEF+Calibri-Bold", 8.0, [0.0; 3]).face.map(|f| f.as_str().to_string()).as_deref(), Some("Calibri"));
+        assert_eq!(Style::of_font("Helvetica-Bold", 8.0, [0.0; 3]).face, None);
+        assert_eq!(Face::named(&"x".repeat(64)), None, "too long to keep");
     }
 
     #[test]
