@@ -2389,8 +2389,9 @@ fn a_rich_value_changes_size_and_colour_mid_line() {
     );
     let (ap, _) = rich_field(&rv, "small BIG under", false);
     let ap = String::from_utf8_lossy(&ap);
-    assert!(ap.contains("/Helv 18 Tf\n1 0 0 rg") && ap.contains("(BIG) Tj"), "{ap}");
-    assert!(ap.contains("/Helv 12 Tf\n0 0 0 rg") && ap.contains("(small ) Tj"), "{ap}");
+    // Each run sets its colour, then its font (the colour also paints its symbols, #10).
+    assert!(ap.contains("1 0 0 rg\n/Helv 18 Tf") && ap.contains("(BIG) Tj"), "{ap}");
+    assert!(ap.contains("0 0 0 rg\n/Helv 12 Tf") && ap.contains("(small ) Tj"), "{ap}");
     assert!(ap.matches(" re f\n").count() >= 1 && ap.find("(under) Tj") < ap.rfind(" re f"), "an underline after the text: {ap}");
 }
 
@@ -2434,12 +2435,12 @@ fn a_rich_value_that_cannot_be_read_falls_back_to_the_plain_value() {
     assert_eq!(fonts, ["HeBo"]);
 }
 
-/// Issue #3: a character no standard font holds (a ballot box in a character sheet's notes) is
-/// drawn as `?` in the rich value and reported, as the plain value's would be, rather than losing
+/// Issue #3: a character no font here holds (U+E000, private use: in no standard font and no
+/// craft-fonts symbol face) is drawn as `?` in the rich value and reported, as the plain value's would be, rather than losing
 /// the formatting of the rest; Thai, which plain drawing has a face for, is drawn plain.
 #[test]
 fn a_rich_value_draws_characters_without_a_standard_glyph_as_reported_question_marks() {
-    let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Tools</b> \u{2610} Thieves</p></body>"), "Tools \u{2610} Thieves", false);
+    let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Tools</b> \u{e000} Thieves</p></body>"), "Tools \u{e000} Thieves", false);
     assert_eq!(fonts, ["HeBo", "Helv"], "still drawn rich");
     assert!(
         String::from_utf8_lossy(&ap).contains("(Tools) Tj") && String::from_utf8_lossy(&ap).contains("( ? Thieves) Tj"),
@@ -2452,18 +2453,310 @@ fn a_rich_value_draws_characters_without_a_standard_glyph_as_reported_question_m
     let obj = field(&fields(&doc), "rich").obj;
     doc.update_dict(obj, |d| {
         d.set(b"Ff".to_vec(), Object::Int(i64::from(flags::RICH_TEXT)));
-        d.set(b"RV".to_vec(), Object::String(PdfString::text(&format!("{XHTML}<p><b>Tools</b> \u{2610}</p></body>"))));
+        d.set(b"RV".to_vec(), Object::String(PdfString::text(&format!("{XHTML}<p><b>Tools</b> \u{e000}</p></body>"))));
     })
     .unwrap();
     let f = field(&fields(&doc), "rich").clone();
-    let (_, undrawn) = crate::appearance::field_appearance_drawn(&doc, &f, &f.widgets[0], &["Tools \u{2610}".to_string()], false);
-    assert_eq!(undrawn, Some('\u{2610}'));
+    let (_, undrawn) = crate::appearance::field_appearance_drawn(&doc, &f, &f.widgets[0], &["Tools \u{e000}".to_string()], false);
+    assert_eq!(undrawn, Some('\u{e000}'));
     let (_, fonts) = rich_field(
         &format!("{XHTML}<p><b>\u{0e2a}\u{0e27}\u{0e31}\u{0e2a}\u{0e14}\u{0e35}</b></p></body>"),
         "\u{0e2a}\u{0e27}\u{0e31}\u{0e2a}\u{0e14}\u{0e35}",
         false,
     );
     assert!(!fonts.contains(&"HeBo".to_string()), "Thai is drawn plain: {fonts:?}");
+}
+
+/// The Type 3 fonts in an appearance's font resources, with the text their `ToUnicode` maps
+/// (hex, as written), after the appearance's streams were moved into `doc`.
+fn type3_fonts(doc: &Document, res: &Dict) -> Vec<(String, String)> {
+    res.iter()
+        .filter_map(|(name, font)| {
+            let font = doc.resolve(font);
+            let d = font.as_dict()?;
+            (d.name(b"Subtype") == Some(b"Type3")).then_some(())?;
+            let cmap = d.get(b"ToUnicode").map(|t| doc.resolve(t))?;
+            let Object::Stream(s) = &*cmap else { return None };
+            Some((String::from_utf8_lossy(name).into_owned(), String::from_utf8_lossy(&s.decoded().ok()?).into_owned()))
+        })
+        .collect()
+}
+
+/// A field `name` (multiline or not, rich text when `rv` is given) filled with `value` and drawn:
+/// its appearance content, its Type 3 fonts, and what [`field_appearance_drawn`] reports undrawn.
+fn symbol_field(value: &str, rv: Option<&str>) -> (String, Vec<(String, String)>, Option<char>) {
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 600.0, 250.0, 680.0], &NewField::Text { multiline: false }, Some("box")).unwrap();
+    let obj = field(&fields(&doc), "box").obj;
+    doc.update_dict(obj, |d| {
+        d.set(b"DA".to_vec(), PdfString::literal(b"/Helv 12 Tf 0 g".to_vec()));
+        d.set(b"V".to_vec(), Object::String(PdfString::text(value)));
+        if let Some(rv) = rv {
+            d.set(b"Ff".to_vec(), Object::Int(i64::from(flags::RICH_TEXT)));
+            d.set(b"RV".to_vec(), Object::String(PdfString::text(rv)));
+        }
+    })
+    .unwrap();
+    redraw_field(&mut doc, "box").unwrap();
+    let f = field(&fields(&doc), "box").clone();
+    let (_, undrawn) = crate::appearance::field_appearance_drawn(&doc, &f, &f.widgets[0], &[value.to_string()], false);
+    let n = doc.get(f.widgets[0].obj).as_dict().unwrap().get(b"AP").unwrap().as_dict().unwrap().reference(b"N").unwrap();
+    let Object::Stream(s) = &*doc.get(n) else { panic!() };
+    let res = s
+        .dict
+        .get(b"Resources")
+        .map(|r| doc.resolve(r))
+        .and_then(|r| r.as_dict().and_then(|r| r.get(b"Font")).map(|f| doc.resolve(f)))
+        .and_then(|f| f.as_dict().cloned())
+        .unwrap_or_default();
+    (String::from_utf8_lossy(&s.decoded().unwrap()).into_owned(), type3_fonts(&doc, &res), undrawn)
+}
+
+/// Issue #10: symbols no standard font has (☐ ✓ ★) are drawn from the craft-fonts symbol face as
+/// Type 3 glyphs beside the field's font, mapped back to their characters, and not reported. A
+/// build without craft-fonts draws `?` and reports the character, as before.
+#[test]
+fn symbols_are_drawn_from_the_symbol_face_in_plain_values() {
+    let (ap, type3, undrawn) = symbol_field("Dice: \u{2610}\u{2610} \u{2713} done", None);
+    if pdfcraft_fonts::symbol_face_for('\u{2610}').is_none() {
+        assert!(type3.is_empty() && ap.contains("(Dice: ?? ? done) Tj"), "{ap}");
+        assert_eq!(undrawn, Some('\u{2610}'), "without the face it is reported");
+        return;
+    }
+    assert_eq!(undrawn, None, "drawn, so not reported: {ap}");
+    assert_eq!(type3.len(), 1, "one Type 3 font for both symbols: {type3:?}");
+    let (name, cmap) = &type3[0];
+    assert!(cmap.contains("<2610>") && cmap.contains("<2713>"), "copy and search get the characters back: {cmap}");
+    assert!(ap.contains(&format!("/{name} 12 Tf")) && ap.contains("(Dice: ) Tj") && ap.contains("( done) Tj"), "{ap}");
+    assert!(!ap.contains('?'), "no ? drawn: {ap}");
+}
+
+/// Issue #10: in a rich value a symbol takes its run's size and colour, inline with the run.
+#[test]
+fn symbols_are_drawn_from_the_symbol_face_in_rich_values() {
+    let rv = format!("{XHTML}<p><b>Tools</b> <span style=\"color:#ff0000;font-size:16pt\">\u{2610}</span> Thieves</p></body>");
+    let (ap, type3, undrawn) = symbol_field("Tools \u{2610} Thieves", Some(&rv));
+    if pdfcraft_fonts::symbol_face_for('\u{2610}').is_none() {
+        assert!(type3.is_empty() && ap.contains("(?) Tj"), "{ap}");
+        assert_eq!(undrawn, Some('\u{2610}'));
+        return;
+    }
+    assert_eq!(undrawn, None, "{ap}");
+    let (name, cmap) = type3.first().unwrap_or_else(|| panic!("a Type 3 font: {ap}"));
+    assert!(cmap.contains("<2610>"), "{cmap}");
+    let at = ap.find(&format!("/{name} 16 Tf")).unwrap_or_else(|| panic!("the symbol at its run's size: {ap}"));
+    assert!(ap[..at].trim_end().ends_with("1 0 0 rg"), "in its run's colour: {ap}");
+    assert!(ap.contains("/HeBo 12 Tf") && ap.contains("(Tools) Tj") && ap.contains("( Thieves) Tj"), "the rest stays rich: {ap}");
+}
+
+fn runs(parts: &[(&str, bool, bool)]) -> FieldValue {
+    use crate::rich::{Family, Paragraph, RichValue, Span, Style};
+    let style = |bold, italic| Style { family: Family::Helvetica, face: None, bold, italic, size: 10.0, color: [0.0, 0.0, 1.0], underline: false };
+    let spans = parts.iter().map(|&(text, bold, italic)| Span { text: text.into(), style: style(bold, italic) }).collect();
+    FieldValue::Rich(RichValue { paragraphs: vec![Paragraph { align: None, spans }] })
+}
+
+/// Issue #4: formatted text written to a text field gives it the plain text as `/V`, the
+/// formatting as `/RV` (reading back as the same runs) and the rich text flag, and draws it rich.
+#[test]
+fn formatted_text_is_written_as_v_rv_and_the_rich_text_flag() {
+    let mut doc = fixture();
+    let value = runs(&[("Plain ", false, false), ("bold", true, false), (" & italic", false, true)]);
+    set_value(&mut doc, "notes", &value).unwrap();
+    let doc = reopen(&doc);
+    let f = field(&fields(&doc), "notes").clone();
+    assert_eq!(f.value, ["Plain bold & italic"]);
+    assert!(f.has(flags::RICH_TEXT) && f.has(flags::MULTILINE), "the rich text flag is added to the field's own: {}", f.flags);
+    let d = doc.get(f.obj).as_dict().cloned().unwrap();
+    let rv = d.get(b"RV").and_then(|v| v.as_string()).map(PdfString::to_text).unwrap();
+    let FieldValue::Rich(written) = &value else { panic!("a rich value") };
+    assert_eq!(crate::rich::parse(&rv, None, crate::rich::Style::of_da(&f.da)).as_ref(), Some(written), "{rv}");
+    let a = ap(&doc, &f.widgets[0]);
+    assert!(a.contains("/HeBo 10 Tf") && a.contains("/HeOb 10 Tf") && a.contains("( & italic) Tj"), "drawn rich: {a}");
+    // A plain value written later replaces it: /RV goes, so it can't contradict /V.
+    let mut doc = doc;
+    set_value(&mut doc, "notes", &FieldValue::Text("plain now".into())).unwrap();
+    assert!(!doc.get(f.obj).as_dict().unwrap().contains(b"RV"));
+}
+
+/// Issue #4: formatted text is refused, with a reason, by fields that can't hold it, and the
+/// field is left as it was.
+#[test]
+fn formatted_text_is_refused_where_it_cannot_be_kept() {
+    let value = runs(&[("12345", true, false)]);
+    for (name, why) in [("zip", "comb"), ("pin", "password"), ("agree", "not a text field"), ("country", "not a text field")] {
+        let mut doc = fixture();
+        let err = set_value(&mut doc, name, &value).unwrap_err().to_string();
+        assert!(err.contains(why), "{name}: {err}");
+        assert!(!doc.get(field(&fields(&doc), name).obj).as_dict().unwrap().contains(b"RV"), "{name}");
+    }
+    let mut doc = fixture();
+    let err = set_value(&mut doc, "notes", &runs(&[("  ", true, false)])).unwrap_err().to_string();
+    assert!(err.contains("has no text"), "{err}");
+    // A Keystroke script that changes the text (to upper case here) leaves nothing to format.
+    struct Upper;
+    impl Scripts for Upper {
+        fn run(&mut self, _: FieldEvent, _: &str, _: &Field, value: &str, _: &[Field]) -> ScriptResult {
+            ScriptResult { rc: true, value: value.to_uppercase(), value_set: true, changes: Vec::new(), message: None }
+        }
+    }
+    let mut doc = fixture();
+    let notes = field(&fields(&doc), "notes").obj;
+    doc.update_dict(notes, |d| {
+        let mut k = Dict::new();
+        k.set(b"S".to_vec(), Object::name("JavaScript"));
+        k.set(b"JS".to_vec(), Object::String(PdfString::text("event.value = event.value.toUpperCase();")));
+        let mut aa = Dict::new();
+        aa.set(b"K".to_vec(), Object::Dict(k));
+        d.set(b"AA".to_vec(), Object::Dict(aa));
+    })
+    .unwrap();
+    let err = set_value_with(&mut doc, "notes", &runs(&[("quiet", false, true)]), &mut Upper).unwrap_err().to_string();
+    assert!(err.contains("scripts changed the text to \"QUIET\""), "{err}");
+}
+
+/// Issue #4: fields that repeat a name (§12.7.3.1) all take the formatted text, as one field.
+#[test]
+fn fields_sharing_a_name_all_take_formatted_text() {
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R 6 0 R] >>".into(),
+        "<< /Fields [5 0 R 6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 7 0 R >> >> >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Client) /Rect [50 700 250 720] /P 3 0 R >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Client) /Rect [50 600 250 620] /P 3 0 R >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(),
+    ];
+    let mut doc = document(&objs);
+    set_value(&mut doc, "Client", &runs(&[("Ada ", false, false), ("Lovelace", true, false)])).unwrap();
+    let doc = reopen(&doc);
+    for f in fields(&doc).iter().filter(|f| f.name == "Client") {
+        assert!(f.has(flags::RICH_TEXT) && doc.get(f.obj).as_dict().unwrap().contains(b"RV"), "field {}", f.obj.num);
+        assert!(ap(&doc, &f.widgets[0]).contains("/HeBo 10 Tf"), "field {} is drawn rich", f.obj.num);
+    }
+}
+
+/// A one-field form whose `/DR` holds Calibri fonts named `fonts` (`/BaseFont` → width of every
+/// character, in thousandths, with `zero` left out at width 0 as a subset leaves unused glyphs),
+/// its `/DA` naming `/Calibri 8 Tf`, rich text `rv` for `value`, redrawn: the appearance's
+/// content, its font resources, and the `/DR` font objects by resource name.
+fn form_font_field(fonts: &[(&str, Option<char>)], rv: &str, value: &str) -> (String, Dict, Dict) {
+    form_font_field_in(fonts, rv, value, [50.0, 600.0, 350.0, 680.0])
+}
+
+/// [`form_font_field`] with the widget at `rect`.
+fn form_font_field_in(fonts: &[(&str, Option<char>)], rv: &str, value: &str, rect: [f64; 4]) -> (String, Dict, Dict) {
+    let mut objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>".into(),
+        String::new(), // 4: the form, once the fonts are numbered
+        format!(
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /Ff {} /DA (/Calibri 8 Tf 0 g) /V {} /RV {} /Rect [{} {} {} {}] /P 3 0 R /MK << >> /BS << /W 0 >> >>",
+            flags::RICH_TEXT | flags::MULTILINE,
+            // /V in PDFDocEncoding, which matches Latin-1 for these values (0xA0 a no-break space).
+            pdfcraft_fonts::literal(&value.chars().filter_map(|c| u8::try_from(u32::from(c)).ok()).collect::<Vec<u8>>())
+                .iter()
+                .map(|&b| b as char)
+                .collect::<String>(),
+            pdfcraft_fonts::literal(rv.as_bytes()).iter().map(|&b| b as char).collect::<String>(),
+            rect[0],
+            rect[1],
+            rect[2],
+            rect[3],
+        ),
+    ];
+    let mut dr = String::new();
+    for (base, zero) in fonts {
+        let widths: Vec<String> = (32u8..=126).map(|c| if Some(char::from(c)) == *zero { "0".into() } else { "500".into() }).collect();
+        objs.push(format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /{base} /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 126 /Widths [{}] >>",
+            widths.join(" ")
+        ));
+        dr.push_str(&format!("/{base} {} 0 R ", objs.len()));
+    }
+    objs[3] = format!("<< /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << {dr}>> >> >>");
+    let mut doc = document(&objs);
+    redraw_field(&mut doc, "notes").unwrap();
+    let w = field(&fields(&doc), "notes").widgets[0].obj;
+    let n = doc.get(w).as_dict().unwrap().get(b"AP").unwrap().as_dict().unwrap().reference(b"N").unwrap();
+    let Object::Stream(s) = &*doc.get(n) else { panic!() };
+    let res = s.dict.get(b"Resources").and_then(Object::as_dict).and_then(|r| r.get(b"Font")).and_then(Object::as_dict).cloned().unwrap();
+    let af = doc.get(ObjRef::new(4, 0)).as_dict().cloned().unwrap();
+    let dr = af.get(b"DR").and_then(Object::as_dict).and_then(|d| d.get(b"Font")).and_then(Object::as_dict).cloned().unwrap();
+    (String::from_utf8_lossy(&s.decoded().unwrap()).into_owned(), res, dr)
+}
+
+/// The x of each `Tm` in an appearance, in order.
+fn tm_xs(ap: &str) -> Vec<f64> {
+    ap.lines().filter_map(|l| l.strip_suffix(" Tm")).filter_map(|l| l.split(' ').nth(4)?.parse().ok()).collect()
+}
+
+/// Issue #9: runs in a font the form has (`/DR`) are drawn in it, measured with its own widths,
+/// and the appearance names the very `/DR` font object rather than a copy of it.
+#[test]
+fn rich_runs_are_drawn_in_the_forms_own_fonts() {
+    let rv = "<body><p style=\"font-family:Calibri;font-size:8pt\">Hi <b>there</b> <i>you</i></p></body>";
+    let (ap, res, dr) = form_font_field(&[("Calibri", None), ("Calibri-Bold", None), ("Calibri-Italic", None)], rv, "Hi there you");
+    assert!(ap.contains("/Calibri 8 Tf") && ap.contains("/Calibri-Bold 8 Tf") && ap.contains("/Calibri-Italic 8 Tf"), "{ap}");
+    for name in [&b"Calibri"[..], b"Calibri-Bold", b"Calibri-Italic"] {
+        assert_eq!(res.get(name), dr.get(name), "{} is the form's own object", String::from_utf8_lossy(name));
+        assert!(matches!(res.get(name), Some(Object::Ref(_))), "referenced, not copied");
+    }
+    // Every character is 500 units, so at 8 pt "Hi " is 12 wide and "there" 20.
+    let xs = tm_xs(&ap);
+    assert_eq!(xs.len(), 4, "{ap}");
+    assert!((xs[1] - xs[0] - 12.0).abs() < 0.01 && (xs[2] - xs[1] - 20.0).abs() < 0.01, "measured in the form font: {xs:?}");
+}
+
+/// Issue #9: a run with a character the form's font left out (a subset's width-0 glyph) is drawn
+/// in the standard 14 font, and only that run: the others keep the form font.
+#[test]
+fn a_run_the_form_font_cannot_draw_falls_back_alone() {
+    let rv = "<body><p style=\"font-family:Calibri;font-size:8pt\">keep <b>jazz</b></p></body>";
+    let (ap, ..) = form_font_field(&[("Calibri", None), ("Calibri-Bold", Some('z'))], rv, "keep jazz");
+    assert!(ap.contains("/Calibri 8 Tf") && ap.contains("(keep ) Tj"), "the plain run keeps Calibri: {ap}");
+    assert!(ap.contains("/HeBo 8 Tf") && ap.contains("(jazz) Tj") && !ap.contains("/Calibri-Bold"), "the bold run falls back: {ap}");
+}
+
+/// Issue #9: a wrapped line fits its box with the space before the word that would overflow it
+/// counted: "aaa bbb" is 7 characters (28 at 500 units and 8 pt), so in a box 27 wide (31 minus
+/// padding) "bbb" goes to the next line, though "aaa" and "bbb" alone are 24.
+#[test]
+fn a_rich_line_wraps_counting_the_space_before_the_next_word() {
+    let rv = "<body><p style=\"font-family:Calibri;font-size:8pt\">aaa bbb</p></body>";
+    let (ap, ..) = form_font_field_in(&[("Calibri", None)], rv, "aaa bbb", [50.0, 600.0, 81.0, 680.0]);
+    assert!(ap.contains("(aaa ) Tj") && ap.contains("(bbb) Tj"), "two lines: {ap}");
+    assert_eq!(tm_xs(&ap), [2.0, 2.0], "each starts a line: {ap}");
+}
+
+/// Issue #9: a no-break space (`&#160;`, as Acrobat writes between runs) that the form font
+/// doesn't map is drawn as a space in that font, not a reason to leave it.
+#[test]
+fn a_no_break_space_keeps_the_run_in_the_form_font() {
+    let rv = "<body><p style=\"font-family:Calibri;font-size:8pt\">an extra<span style=\"xfa-spacerun:yes\">&#160;</span>2d6</p></body>";
+    let (ap, ..) = form_font_field(&[("Calibri", None)], rv, "an extra\u{a0}2d6");
+    assert!(ap.contains("/Calibri 8 Tf") && ap.contains("(an extra 2d6) Tj") && !ap.contains("/Helv"), "{ap}");
+}
+
+/// Issue #9: a bold or italic run uses the form's font of that weight and posture when it has one;
+/// with only the regular face it keeps the weight in the standard font (Helvetica-Bold), not the
+/// family in regular Calibri.
+#[test]
+fn a_bold_run_without_a_bold_form_font_keeps_its_weight() {
+    let rv = "<body><p style=\"font-family:Calibri;font-size:8pt\">plain <b>bold</b> <i>slant</i> <b><i>both</i></b></p></body>";
+    let (ap, ..) = form_font_field(&[("Calibri", None)], rv, "plain bold slant both");
+    let font_before = |text: &str| {
+        let at = ap.find(&format!("({text}) Tj")).unwrap_or_else(|| panic!("{text} in {ap}"));
+        ap[..at].rsplit(" Tf").nth(1).and_then(|l| l.rsplit('/').next()).map(|f| f.split(' ').next().unwrap_or(f).to_string()).unwrap()
+    };
+    assert_eq!(
+        [font_before("plain "), font_before("bold"), font_before("slant"), font_before("both")],
+        ["Calibri", "HeBo", "HeOb", "HeBO"].map(String::from),
+        "{ap}"
+    );
+    let (ap, ..) = form_font_field(&[("ABCDEF+Calibri", None), ("ABCDEF+Calibri-BoldItalic", None)], rv, "plain bold slant both");
+    assert!(ap.contains("/ABCDEF+Calibri-BoldItalic 8 Tf") && ap.contains("/HeBo 8 Tf"), "a subset's tag is not part of its name: {ap}");
 }
 
 /// Issue #1: a `/DA` that already names a bold or italic standard font, by resource or base font

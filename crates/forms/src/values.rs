@@ -168,6 +168,9 @@ fn share_value(
                 }
                 _ => None,
             };
+            // Formatted text the source took goes to the twin too, as the same field (§12.7.3.1).
+            let src_rv = src.get(b"RV").filter(|_| twin.kind == FieldKind::Text).cloned();
+            let twin_flags = if src_rv.is_some() { twin.flags | flags::RICH_TEXT } else { twin.flags };
             doc.update_dict(twin.obj, |d| {
                 match src.get(b"V") {
                     Some(v) => d.set(b"V".to_vec(), v.clone()),
@@ -181,13 +184,16 @@ fn share_value(
                         d.remove(b"I");
                     }
                 }
-                // As in `write_value`: the twin's own rich text stays while its value is unchanged.
-                if twin.value.len() != value.len() || twin.value.iter().zip(value).any(|(a, b)| !same_text(a, b)) {
+                if let Some(rv) = &src_rv {
+                    d.set(b"RV".to_vec(), rv.clone());
+                    d.set(b"Ff".to_vec(), Object::Int(i64::from(twin_flags)));
+                } else if twin.value.len() != value.len() || twin.value.iter().zip(value).any(|(a, b)| !same_text(a, b)) {
+                    // As in `write_value`: the twin's own rich text stays while its value is unchanged.
                     d.remove(b"RV");
                 }
             })?;
             // Drawn with the options that `/I` selects, not only the export values.
-            let mut shown = twin.clone();
+            let mut shown = Field { flags: twin_flags, ..twin.clone() };
             shown.value = value.to_vec();
             if matches!(twin.kind, FieldKind::Combo | FieldKind::List) {
                 shown.selected = selected_options(&twin.options, value, positions.as_deref());
@@ -300,8 +306,37 @@ fn same_text(a: &str, b: &str) -> bool {
     a == b || lines(a) == lines(b)
 }
 
+/// Fill text field `f` with formatted text (#4): its plain text as any value is written (length
+/// limit, Keystroke and Validate scripts), then `/RV` and the rich text flag, drawn rich.
+fn write_rich(doc: &mut Document, f: &Field, rich: &crate::rich::RichValue, scripts: &mut dyn Scripts) -> Result<(), FormError> {
+    if f.is_comb() || f.has(flags::PASSWORD) {
+        let kind = if f.is_comb() { "comb" } else { "password" };
+        return invalid(format!("{:?} is a {kind} field, which can't hold formatted text", f.name));
+    }
+    let plain = rich.plain_text();
+    if plain.trim().is_empty() {
+        return invalid(format!("formatted text for {:?} has no text; fill it with \"\" to clear it", f.name));
+    }
+    write_value(doc, f, &FieldValue::Text(plain), scripts)?;
+    // What the field took after its scripts: the formatting is only for that text.
+    let taken = doc.get(f.obj).as_dict().and_then(|d| d.get(b"V").map(|v| doc.resolve(v))).and_then(|v| v.as_string().map(|s| s.to_text()));
+    let taken = taken.unwrap_or_default();
+    if !rich.matches(&taken) {
+        return invalid(format!("{:?}'s scripts changed the text to {taken:?}, so it can't keep its formatting", f.name));
+    }
+    let flags = f.flags | flags::RICH_TEXT;
+    doc.update_dict(f.obj, |d| {
+        d.set(b"RV".to_vec(), PdfString::text(&rich.to_xhtml()));
+        d.set(b"Ff".to_vec(), Object::Int(i64::from(flags)));
+    })?;
+    let shown = Field { flags, ..f.clone() };
+    redraw(doc, &shown, std::slice::from_ref(&taken), scripts)
+}
+
 pub(crate) fn write_value(doc: &mut Document, f: &Field, value: &FieldValue, scripts: &mut dyn Scripts) -> Result<(), FormError> {
     match (f.kind, value) {
+        (FieldKind::Text, FieldValue::Rich(rich)) => write_rich(doc, f, rich, scripts),
+        (_, FieldValue::Rich(_)) => invalid(format!("{:?} is not a text field: only text fields take formatted text", f.name)),
         (FieldKind::Text, FieldValue::Text(t)) => {
             if let Some(max) = f.max_len
                 && t.chars().count() > max
@@ -366,7 +401,7 @@ pub(crate) fn write_value(doc: &mut Document, f: &Field, value: &FieldValue, scr
                     }
                 }
                 FieldValue::Radio(None) => None,
-                FieldValue::Choice(_) | FieldValue::ChoiceIndices(_) | FieldValue::Widget(_) => {
+                FieldValue::Choice(_) | FieldValue::ChoiceIndices(_) | FieldValue::Widget(_) | FieldValue::Rich(_) => {
                     return invalid(format!("{:?} is a check box: use true or false", f.name));
                 }
             };
