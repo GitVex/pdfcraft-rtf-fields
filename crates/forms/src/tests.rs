@@ -796,6 +796,21 @@ fn an_unchanged_value_keeps_the_rich_text_and_a_new_one_drops_it() {
     assert_eq!(field(&fields(&doc), "name").value, ["Grace"]);
 }
 
+/// Issue #2: a multiline value given back with other line breaks (`\n` for the `\r` Acrobat
+/// writes) is the same value, and keeps its rich text; other text still drops it.
+#[test]
+fn an_unchanged_value_with_other_line_breaks_keeps_the_rich_text() {
+    let notes = ObjRef::new(11, 0);
+    let mut doc = fixture();
+    doc.update_dict(notes, |d| d.set(b"V".to_vec(), Object::String(PdfString::text("one\r\ntwo\rthree")))).unwrap();
+    make_rich(&mut doc, notes);
+    set_value(&mut doc, "notes", &FieldValue::Text("one\ntwo\nthree".into())).unwrap();
+    let mut doc = reopen(&doc);
+    assert!(has_rich_value(&doc, notes).0, "only the line breaks are written differently");
+    set_value(&mut doc, "notes", &FieldValue::Text("one\ntwo\nfour".into())).unwrap();
+    assert!(!has_rich_value(&reopen(&doc), notes).0, "different text drops it");
+}
+
 /// Issue #2, for fields that repeat a name (§12.7.3.1): each one keeps its own `/RV` while the
 /// name's value is unchanged, and loses it when the value changes.
 #[test]
