@@ -2607,11 +2607,18 @@ fn select_last(h: &mut Harness<'static, PdfCraftApp>, n: usize) {
     }
 }
 
-/// Commit the field being edited, as Tab does.
+/// Commit the field "notes" by clicking the page below it.
 fn commit(h: &mut Harness<'static, PdfCraftApp>) {
-    h.key_press(egui::Key::Tab);
-    h.run_steps(4);
-    assert!(h.state().views[0].forms.focus.as_ref().is_none_or(|f| f.rich.is_none()), "committed");
+    let below = {
+        let s = h.state();
+        let doc = s.session.get(s.views[0].id).unwrap();
+        let f = doc.form.iter().find(|f| f.name == "notes").unwrap();
+        let r = pdfcraft_ui_egui::forms_ui::field_screen_rect(&s.views[0], &doc.info, f, 0).unwrap();
+        egui::pos2(r.center().x, r.max.y + 60.0)
+    };
+    click_at(h, below);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_none(), "committed");
 }
 
 /// Issue #12: a size picked in Format text applies to the selected part of a line only, and is
@@ -2630,7 +2637,7 @@ fn a_size_from_format_text_applies_to_part_of_a_line() {
     assert!(h.state().views[0].forms.focus.is_some(), "the field stays open");
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
     h.run_steps(2);
-    assert!(h.query_by_value("Mixed").is_some(), "two sizes selected show as mixed");
+    assert!(h.query_all_by_value("Mixed").next().is_some(), "two sizes selected show as mixed");
     commit(&mut h);
     let runs: Vec<(String, f64)> = saved_runs(&h).into_iter().map(|(t, s)| (t, s.size)).collect();
     assert_eq!(runs, [("Sneak".to_string(), 12.0), (" ".to_string(), 12.0), ("Attack".to_string(), 18.0)]);

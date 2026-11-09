@@ -252,12 +252,8 @@ fn a_craft_family_through_form_fill_rich() {
     let s = a.session();
     let doc = s.get(pdfcraft_engine::DocId(reopened)).unwrap();
     let rich = doc.field_rich_value("alpha").expect("a rich value");
-    let runs: Vec<(String, Option<String>, bool)> = rich
-        .paragraphs
-        .iter()
-        .flat_map(|p| &p.spans)
-        .map(|r| (r.text.clone(), r.style.face.map(|f| f.as_str().to_string()), r.style.bold))
-        .collect();
+    let runs: Vec<(String, Option<String>, bool)> =
+        rich.paragraphs.iter().flat_map(|p| &p.spans).map(|r| (r.text.clone(), r.style.face.map(|f| f.as_str().to_string()), r.style.bold)).collect();
     assert_eq!(runs[1], ("Sneak".to_string(), Some("Carlito".to_string()), true), "{runs:?}");
     std::fs::remove_dir_all(dir).ok();
 }
