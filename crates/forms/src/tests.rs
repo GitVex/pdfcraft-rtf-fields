@@ -735,6 +735,67 @@ fn whitespace_only_text_is_kept_in_a_field_without_a_format() {
     assert!(field(&fields(&reopen(&doc)), "name").value.is_empty());
 }
 
+/// A rich text value (`/RV`, §12.7.4.3) another app wrote, with its default style (`/DS`).
+const RICH: &str = "<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\"><p><b>Ada</b></p></body>";
+
+fn has_rich_value(doc: &Document, obj: ObjRef) -> (bool, bool) {
+    let d = doc.get(obj).as_dict().cloned().unwrap();
+    (d.get(b"RV").is_some(), d.get(b"DS").is_some())
+}
+
+fn make_rich(doc: &mut Document, obj: ObjRef) {
+    doc.update_dict(obj, |d| {
+        d.set(b"Ff".to_vec(), Object::Int(i64::from(flags::RICH_TEXT)));
+        d.set(b"RV".to_vec(), Object::String(PdfString::text(RICH)));
+        d.set(b"DS".to_vec(), Object::String(PdfString::text("font: Helvetica 12pt")));
+    })
+    .unwrap();
+}
+
+/// Issue #2: setting a text field to the value it already has keeps its formatting (`/RV`), which
+/// another app wrote and PdfCraft can't yet rewrite; a new value still drops it, so `/RV` never
+/// contradicts `/V`. `/DS` is the default style and stays either way.
+#[test]
+fn an_unchanged_value_keeps_the_rich_text_and_a_new_one_drops_it() {
+    let name = ObjRef::new(10, 0);
+    let mut doc = fixture();
+    make_rich(&mut doc, name);
+    set_value(&mut doc, "name", &FieldValue::Text("Ada".into())).unwrap();
+    let doc = reopen(&doc);
+    assert_eq!(has_rich_value(&doc, name), (true, true), "the same value keeps /RV and /DS");
+    assert_eq!(doc.get(name).as_dict().unwrap().get(b"RV").and_then(|v| v.as_string()).map(PdfString::to_text).as_deref(), Some(RICH));
+    let mut doc = doc;
+    set_value(&mut doc, "name", &FieldValue::Text("Grace".into())).unwrap();
+    let doc = reopen(&doc);
+    assert_eq!(has_rich_value(&doc, name), (false, true), "a new value drops /RV, which would contradict /V");
+    assert_eq!(field(&fields(&doc), "name").value, ["Grace"]);
+}
+
+/// Issue #2, for fields that repeat a name (§12.7.3.1): each one keeps its own `/RV` while the
+/// name's value is unchanged, and loses it when the value changes.
+#[test]
+fn fields_sharing_a_name_keep_their_rich_text_while_the_value_is_unchanged() {
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".into(),                 // 1
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>".into(), // 2
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R 6 0 R] >>".into(),             // 3
+        "<< /Fields [5 0 R 6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 7 0 R >> >> >>".into(), // 4
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Client) /V (Ada) /Rect [50 700 250 720] /P 3 0 R >>".into(), // 5
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Client) /V (Ada) /Rect [50 600 250 620] /P 3 0 R >>".into(), // 6
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(), // 7
+    ];
+    let (first, twin) = (ObjRef::new(5, 0), ObjRef::new(6, 0));
+    let mut doc = document(&objs);
+    make_rich(&mut doc, first);
+    make_rich(&mut doc, twin);
+    set_value(&mut doc, "Client", &FieldValue::Text("Ada".into())).unwrap();
+    let mut doc = reopen(&doc);
+    assert_eq!((has_rich_value(&doc, first).0, has_rich_value(&doc, twin).0), (true, true), "the same value keeps both");
+    set_value(&mut doc, "Client", &FieldValue::Text("Grace".into())).unwrap();
+    let doc = reopen(&doc);
+    assert_eq!((has_rich_value(&doc, first).0, has_rich_value(&doc, twin).0), (false, false), "a new value drops both");
+}
+
 #[test]
 fn text_fields_get_new_appearances() {
     let mut doc = fixture();

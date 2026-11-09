@@ -10,7 +10,8 @@
 //! - [`table`]: a table of text fields, laid out and named before any of it is added.
 //!
 //! Not yet: JavaScript actions (format, keystroke, validate, calculate — M6.4/M6.5) and rich text
-//! values (`/RV`, which is removed when a value is set so it can't contradict `/V`).
+//! values (`/RV` is kept while its field's value is unchanged, and removed when a new value is set
+//! so it can't contradict `/V`).
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 

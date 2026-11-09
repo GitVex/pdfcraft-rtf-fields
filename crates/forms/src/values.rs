@@ -181,7 +181,10 @@ fn share_value(
                         d.remove(b"I");
                     }
                 }
-                d.remove(b"RV");
+                // As in `write_value`: the twin's own rich text stays while its value is unchanged.
+                if twin.value.as_slice() != value {
+                    d.remove(b"RV");
+                }
             })?;
             // Drawn with the options that `/I` selects, not only the export values.
             let mut shown = twin.clone();
@@ -307,13 +310,18 @@ pub(crate) fn write_value(doc: &mut Document, f: &Field, value: &FieldValue, scr
             af::validate(&f.actions.validate, t).map_err(FormError::Invalid)?;
             let t = &scripting::accept(doc, f, t, scripts)?;
             let shadow = t.is_empty() && crate::author::ancestor_sets(doc, f.obj, b"V");
+            // Rich text (`/RV`) another app wrote is kept while the value it formats is unchanged
+            // (#2); a new value drops it so it can't contradict `/V`.
+            let unchanged = f.value.first().map_or("", String::as_str) == t.as_str();
             doc.update_dict(f.obj, |d| {
                 if t.is_empty() && !shadow {
                     d.remove(b"V");
                 } else {
                     d.set(b"V".to_vec(), PdfString::text(t));
                 }
-                d.remove(b"RV");
+                if !unchanged {
+                    d.remove(b"RV");
+                }
             })?;
             redraw(doc, f, std::slice::from_ref(t), scripts)
         }
