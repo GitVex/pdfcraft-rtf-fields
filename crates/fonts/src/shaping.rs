@@ -28,7 +28,12 @@ pub enum ShapedScript {
     Arabic,
     Hebrew,
     Thai,
+    /// The `n`th symbol face ([`crate::symbol_fonts`]): one glyph per character, not shaped.
+    Symbol(u8),
 }
+
+/// How many symbol faces are looked in, in manifest order.
+const SYMBOL_FACES: u8 = 4;
 
 impl ShapedScript {
     pub fn font(self) -> Option<&'static crate::CraftFont> {
@@ -36,6 +41,7 @@ impl ShapedScript {
             Self::Arabic => crate::document_arabic_font(),
             Self::Hebrew => crate::document_hebrew_font(false),
             Self::Thai => crate::document_thai_font(),
+            Self::Symbol(n) => crate::symbol_fonts().get(usize::from(n)).copied(),
         }
     }
 }
@@ -44,10 +50,12 @@ fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)>
     static FACE: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     static HEBREW: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     static THAI: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
+    static SYMBOL: [OnceLock<Option<(FontRef<'static>, ShaperData)>>; SYMBOL_FACES as usize] = [const { OnceLock::new() }; SYMBOL_FACES as usize];
     let cache = match script {
         ShapedScript::Arabic => &FACE,
         ShapedScript::Hebrew => &HEBREW,
         ShapedScript::Thai => &THAI,
+        ShapedScript::Symbol(n) => SYMBOL.get(usize::from(n))?,
     };
     cache
         .get_or_init(|| {
@@ -81,6 +89,23 @@ pub fn shape_hebrew(text: &str, rtl: bool) -> Result<Vec<ShapedCluster>, GlyphEr
     shape_script(text, rtl, ShapedScript::Hebrew)
 }
 
+/// The symbol face with a glyph for `c`, as the [`ShapedScript`] that owns it; `None` without one
+/// (or without craft-fonts).
+pub fn symbol_face_for(c: char) -> Option<ShapedScript> {
+    (0..SYMBOL_FACES).map(ShapedScript::Symbol).find(|s| face(*s).is_some_and(|(font, _)| font.charmap().map(c).is_some()))
+}
+
+/// `c` as one cluster in the symbol face that has it: its glyph at the pen and its own advance
+/// (em). Symbols need no shaping: one character, one glyph.
+pub fn symbol_cluster(c: char) -> Option<ShapedCluster> {
+    let script = symbol_face_for(c)?;
+    let (font, _) = face(script)?;
+    let id = font.charmap().map(c)?;
+    let upem = f64::from(font.head().ok()?.units_per_em().max(1));
+    let advance = f64::from(font.glyph_metrics(Size::unscaled(), LocationRef::default()).advance_width(id)?) / upem;
+    Some(ShapedCluster { script, glyphs: vec![(id.to_u32(), [0.0, 0.0])], advance, text: c.to_string() })
+}
+
 pub fn thai_has(c: char) -> bool {
     face(ShapedScript::Thai).is_some_and(|(font, _)| font.charmap().map(c).is_some())
 }
@@ -102,11 +127,12 @@ fn shape_script(text: &str, rtl: bool, kind: ShapedScript) -> Result<Vec<ShapedC
         ShapedScript::Arabic => script::ARABIC,
         ShapedScript::Hebrew => script::HEBREW,
         ShapedScript::Thai => script::THAI,
+        ShapedScript::Symbol(_) => script::COMMON,
     });
     // Preserve the historical Arabic per-character mapping; Hebrew and Thai marks stay with their base.
     buffer.set_cluster_level(match kind {
         ShapedScript::Arabic => BufferClusterLevel::Characters,
-        ShapedScript::Hebrew | ShapedScript::Thai => BufferClusterLevel::MonotoneGraphemes,
+        ShapedScript::Hebrew | ShapedScript::Thai | ShapedScript::Symbol(_) => BufferClusterLevel::MonotoneGraphemes,
     });
     let shaped = shaper.shape(buffer, ShapeOptions::new());
     // Clusters are byte offsets into `text`; a cluster shows the characters up to the next one.

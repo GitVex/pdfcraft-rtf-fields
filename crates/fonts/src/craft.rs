@@ -71,6 +71,13 @@ pub fn ui_thai_fonts() -> Vec<&'static CraftFont> {
     CRAFT_FONTS.iter().filter(|f| f.covers("Thai")).collect()
 }
 
+/// The `Zsym` craft-fonts faces (Noto Sans Symbols, Noto Sans Symbols 2), in manifest order: the
+/// symbols (☐ ✓ ★ …) no standard font has, drawn beside a field's or text's own font. Empty when
+/// built without craft-fonts.
+pub fn symbol_fonts() -> Vec<&'static CraftFont> {
+    CRAFT_FONTS.iter().filter(|f| f.covers("Zsym")).collect()
+}
+
 pub fn document_thai_font() -> Option<&'static CraftFont> {
     ui_thai_fonts().into_iter().next()
 }
