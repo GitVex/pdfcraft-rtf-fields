@@ -4,7 +4,7 @@ use super::{
     Arc, DocId, Document, Edit, EditCtx, EditError, Label, MAX_UNDO, ObjectKind, OnceLock, RenderPool, SaveOptions, Scope, Session,
     XFA_REMOVED_PREFIX, XFA_SCRIPTS_OFF, carry_verdict_marks, check_permission, comment_list, display_bytes, display_config, guard, info_fields,
     inspect, js, keys_after, note_warnings, render_threads, run_edit, scan_colours, scope_of, shown_under_redactions, signatures_of, sync_xfa_state,
-    undrawn_notices, uses_scripts, write_incremental, xfa, xfa_sync_datasets,
+    twin_notices, undrawn_notices, uses_scripts, write_incremental, xfa, xfa_sync_datasets,
 };
 use crate::{EditNotice, MarkKind, print_preview_layers};
 
@@ -225,6 +225,7 @@ impl Session {
         if cx.redaction_identification != pdfcraft_redact::Identification::default() {
             notices.push(EditNotice::RedactionIdentification(cx.redaction_identification));
         }
+        note_twins(&mut next, &notices);
         let previous = std::mem::replace(&mut editor.cos, next);
         let keys = keys_after(&edit).unwrap_or_else(|| editor.keys.clone());
         let previous_keys = std::mem::replace(&mut editor.keys, keys);
@@ -620,11 +621,24 @@ fn take_xfa_output(doc: &mut Document, out: js::JsOutput, ran_away: bool) {
     }
 }
 
+/// A twin drawn in place of a font the file doesn't embed is a substitution: the repair log of
+/// `next` keeps it too, not only the edit's notice (#14; AGENTS.md §5, fidelity).
+fn note_twins(next: &mut pdfcraft_cos::Document, notices: &[EditNotice]) {
+    for n in notices {
+        if let EditNotice::Twin(t) = n {
+            next.note_repair(t.to_string());
+        }
+    }
+}
+
 /// What `edit`, taking `prev` to `next`, wants said: never silent (AGENTS.md §4).
 fn edit_notices(edit: &Edit, prev: &pdfcraft_cos::Document, next: &pdfcraft_cos::Document) -> Vec<EditNotice> {
     // What it drew with `?` (a value or comment text its font can't draw, stored as typed).
     let mut notices: Vec<EditNotice> = if matches!(scope_of(edit), Scope::Form | Scope::Comments | Scope::Full) {
-        guard(|| undrawn_notices(prev, next)).unwrap_or_default().into_iter().map(EditNotice::Undrawn).collect()
+        let mut n: Vec<EditNotice> = guard(|| undrawn_notices(prev, next)).unwrap_or_default().into_iter().map(EditNotice::Undrawn).collect();
+        // Fields drawn with an open twin of a font the file doesn't embed (#14).
+        n.extend(guard(|| twin_notices(prev, next)).unwrap_or_default().into_iter().map(EditNotice::Twin));
+        n
     } else {
         Vec::new()
     };

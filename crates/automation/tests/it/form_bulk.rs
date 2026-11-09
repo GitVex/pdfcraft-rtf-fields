@@ -255,3 +255,48 @@ fn craft_field_fonts_through_form_set_props() {
     assert_eq!(a.session().get(DocId(reopened)).unwrap().field_look("beta").unwrap().font, FieldFont::Times, "only the field asked");
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Issue #14: filling a field whose form font the file doesn't embed (Calibri) draws it with its
+/// open twin, and says so: a warning in form_fill's result and a line in the repair log
+/// (doc_info). Without craft-fonts, no such note.
+#[test]
+fn a_twin_drawn_for_a_missing_form_font_is_said() {
+    let dir = std::env::temp_dir().join(format!("pdfcraft-form-bulk-twin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>",
+        "<< /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Calibri 6 0 R >> >> >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /DA (/Calibri 10 Tf 0 g) /Rect [50 700 350 720] /P 3 0 R >>",
+        "<< /Type /Font /Subtype /TrueType /BaseFont /Calibri /Encoding /WinAnsiEncoding >>",
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    std::fs::write(dir.join("calibri.pdf"), pdf).unwrap();
+    let mut a = Automation::new().with_root(&dir).unwrap();
+    let id = tool(&mut a, "doc_open", json!({"path": "calibri.pdf"}))["doc"].as_u64().unwrap();
+    let out = tool(&mut a, "form_fill", json!({"doc": id, "values": {"notes": "Sneak Attack"}}));
+    let warnings: Vec<String> =
+        out["warnings"].as_array().map(|w| w.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let repairs: Vec<String> =
+        tool(&mut a, "doc_info", json!({"doc": id}))["repairs"].as_array().unwrap().iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+    let said = |lines: &[String]| lines.iter().any(|w| w.contains("\"notes\"") && w.contains("Carlito for Calibri"));
+    if pdfcraft_engine::FieldFont::all().iter().any(|f| f.key() == "carlito") {
+        assert!(said(&warnings), "form_fill says so: {out}");
+        assert!(said(&repairs), "the repair log keeps it: {repairs:?}");
+    } else {
+        assert!(!said(&warnings) && !said(&repairs), "{out}");
+    }
+    std::fs::remove_dir_all(dir).ok();
+}

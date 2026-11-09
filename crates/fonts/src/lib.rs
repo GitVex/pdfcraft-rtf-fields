@@ -33,8 +33,8 @@ pub use script::{
     script_missing, script_outline,
 };
 pub use shaping::{
-    ShapedCluster, ShapedScript, arabic_glyph, arabic_has, face_glyph, hebrew_has, shape_arabic, shape_hebrew, shape_thai, shaped_glyph,
-    symbol_cluster, symbol_face_for, thai_has,
+    ShapedCluster, ShapedScript, arabic_glyph, arabic_has, face_cluster, face_glyph, hebrew_has, shape_arabic, shape_hebrew, shape_thai,
+    shaped_glyph, symbol_cluster, symbol_face_for, thai_has, twin_for, twin_label,
 };
 pub use std14::{Match as Std14Match, Std14};
 

@@ -24,6 +24,7 @@
 //! rotation 0 leaves `/Matrix` off.
 
 use pdfcraft_cos::{Dict, Document, Object, Stream};
+use pdfcraft_fonts::ShapedScript;
 use pdfcraft_fonts::pdf::Metrics;
 use pdfcraft_fonts::shaped_glyph as shaped_glyph_of;
 use pdfcraft_fonts::shaped_text::{self, Piece, ShapedFonts};
@@ -848,8 +849,9 @@ fn field_appearance_fit(doc: &Document, f: &Field, w: &Widget, values: &[String]
         Some((o, enc)) => (da.font.clone(), o, enc),
         None => ("Helv".to_string(), helvetica(), FontText::WinAnsi),
     };
-    let width_of =
-        |text: &str, size: f64| if shaped { shaped_text::fallback_width(text, size, |s, size| enc.width(s, size)) } else { enc.width(text, size) };
+    // A form font the file doesn't embed is drawn with its open twin, which has its widths (#14).
+    let twin = (font_name == da.font).then(|| form_font_twin(doc, &font_obj)).flatten();
+    let width_of = |text: &str, size: f64| measure(text, size, &enc, shaped, twin.as_ref().map(|t| t.0));
     // How far a line's ink reaches below and above its baseline (em), where Thai stacks or
     // descenders reach past the form font's (Helvetica's) -0.207 and 0.718; `None` otherwise.
     let thai_ink = |line: &str| thai.then(|| shaped_text::thai_reach(line)).flatten().map(|[lo, hi]| [lo.min(-0.207), hi.max(0.718)]);
@@ -973,7 +975,7 @@ fn field_appearance_fit(doc: &Document, f: &Field, w: &Widget, values: &[String]
             }
         }
     }
-    let (body, fonts, unencodable) = draw_lines(&shown, size, &font_name, font_obj, &enc, shaped);
+    let (body, fonts, unencodable) = draw_lines(&shown, size, &font_name, font_obj, &enc, shaped, twin.as_ref().map(|t| t.0));
     // Acrobat regenerates only what is inside /Tx BMC when it redraws a field (e.g. on focus
     // changes), discarding what came before it (issues #1613, #633). The background and border
     // therefore go inside the marked-content block too, so a redraw keeps them with the text.
@@ -997,9 +999,59 @@ fn field_appearance_fit(doc: &Document, f: &Field, w: &Widget, values: &[String]
     d.set(b"Subtype".to_vec(), Object::name("Form"));
     set_form_box(&mut d, place);
     d.set(b"Resources".to_vec(), Object::Dict(res));
+    mark_twins(&mut d, twin.iter().map(|(script, base)| (base.as_str(), *script)));
     // Nothing drawn is nothing cut, however small the box.
     let overflow = overflow.filter(|_| !text.is_empty());
     (Stream::flate(d, &content), unencodable, overflow)
+}
+
+/// The width of `text` at `size` as the plain value draws it: in the field's font `enc`, with Thai
+/// and fallback symbols from the craft-fonts faces when `shaped`, or with the field font's open
+/// `twin` (#14).
+fn measure(text: &str, size: f64, enc: &FontText, shaped: bool, twin: Option<ShapedScript>) -> f64 {
+    match twin {
+        Some(twin) => shaped_text::twin_width(text, size, twin, |s, size| enc.width(s, size)),
+        None if shaped => shaped_text::fallback_width(text, size, |s, size| enc.width(s, size)),
+        None => enc.width(text, size),
+    }
+}
+
+/// The key on an appearance PdfCraft drew with open twins (#14): `Calibri|Carlito`, one pair per
+/// font, `; ` between them. The engine reads it to say so; the form's own fonts are unchanged.
+pub const TWIN_MARK: &[u8] = b"PCTwin";
+
+/// Record on the appearance `d` which form fonts (`/BaseFont`) were drawn with which twin.
+fn mark_twins<'a>(d: &mut Dict, twins: impl Iterator<Item = (&'a str, ShapedScript)>) {
+    let mut pairs: Vec<String> = twins.filter_map(|(base, t)| Some(format!("{base}|{}", pdfcraft_fonts::twin_label(t)?))).collect();
+    pairs.sort();
+    pairs.dedup();
+    if !pairs.is_empty() {
+        d.set(TWIN_MARK.to_vec(), Object::String(pdfcraft_cos::PdfString::text(&pairs.join("; "))));
+    }
+}
+
+/// The open twin of the form font `font` (a `/DR` entry) and its `/BaseFont`, when the file
+/// doesn't embed it (#14): a simple font whose descriptor has no font program, and a twin in the
+/// craft-fonts Latin faces for its family in its weight and posture (from the name).
+fn form_font_twin(doc: &Document, font: &Object) -> Option<(ShapedScript, String)> {
+    let font = doc.resolve(font);
+    let fd = font.as_dict()?;
+    if !matches!(fd.name(b"Subtype"), Some(b"Type1" | b"TrueType" | b"MMType1")) {
+        return None;
+    }
+    let embedded = fd
+        .get(b"FontDescriptor")
+        .map(|d| doc.resolve(d))
+        .and_then(|d| d.as_dict().map(|d| [&b"FontFile"[..], b"FontFile2", b"FontFile3"].iter().any(|k| d.contains(k))))
+        .unwrap_or(false);
+    if embedded {
+        return None;
+    }
+    let base = String::from_utf8_lossy(fd.name(b"BaseFont")?).into_owned();
+    let style = base.split_once(['-', ',']).map_or(String::new(), |(_, s)| s.to_ascii_lowercase());
+    let bold = ["bold", "black", "heavy"].iter().any(|w| style.contains(w));
+    let italic = style.contains("italic") || style.contains("oblique");
+    Some((pdfcraft_fonts::twin_for(&base, bold, italic)?, base))
 }
 
 /// Whether a text field or combo box draws the fallback symbols in `text` from the craft-fonts
@@ -1013,12 +1065,20 @@ fn symbols_drawn(f: &Field, own_font_holds: bool, text: &str) -> bool {
 /// the field's font `font_name` (`font`, written with `enc`) and, with `thai`, their Thai and
 /// fallback symbols from the craft-fonts faces; the font resources they use, and the first character drawn as `?` because the
 /// font can't hold it, for the caller to report.
-fn draw_lines(shown: &[(f64, f64, String)], size: f64, font_name: &str, font: Object, enc: &FontText, thai: bool) -> (Vec<u8>, Dict, Option<char>) {
+fn draw_lines(
+    shown: &[(f64, f64, String)],
+    size: f64,
+    font_name: &str,
+    font: Object,
+    enc: &FontText,
+    thai: bool,
+    twin: Option<ShapedScript>,
+) -> (Vec<u8>, Dict, Option<char>) {
     let mut fonts = Dict::new();
     fonts.set(font_name.as_bytes().to_vec(), font);
     let lines: Vec<String> = shown.iter().map(|(_, _, text)| text.clone()).collect();
-    let (pieces, shaped) = if thai {
-        shaped_text::appearance_lines(&lines, &mut fonts)
+    let (pieces, shaped) = if thai || twin.is_some() {
+        shaped_text::appearance_lines_in(&lines, &mut fonts, twin)
     } else {
         (lines.into_iter().map(|l| vec![Piece::Latin(l)]).collect(), ShapedFonts::default())
     };
@@ -1109,6 +1169,7 @@ fn rich_field_appearance(
     let mut res = Dict::new();
     res.set(b"Font".to_vec(), Object::Dict(drawn.fonts));
     d.set(b"Resources".to_vec(), Object::Dict(res));
+    mark_twins(&mut d, drawn.twins.iter().map(|(base, t)| (base.as_str(), *t)));
     Some((Stream::flate(d, &drawn.content), drawn.undrawn, drawn.overflow))
 }
 
@@ -1129,32 +1190,58 @@ struct RichDrawn {
     fonts: Dict,
     overflow: Option<Overflow>,
     undrawn: Option<char>,
+    /// The form fonts (`/BaseFont`) drawn with an open twin, and the twin (#14).
+    twins: Vec<(String, ShapedScript)>,
 }
 
 /// The font a rich run is drawn in: a standard 14 font, or one of the form's own (`/DR`, #9).
 enum RunFont {
     Standard(pdfcraft_fonts::Std14),
-    Form { resource: String, object: Object, text: FontText },
+    Form {
+        resource: String,
+        object: Object,
+        text: FontText,
+    },
+    /// A form font the file doesn't embed (`base`), drawn with its open twin (#14); characters the
+    /// twin lacks are drawn in the standard font `standard`.
+    Twin {
+        twin: ShapedScript,
+        standard: pdfcraft_fonts::Std14,
+        base: String,
+    },
 }
 
 impl RunFont {
     /// The width of `s` as it is drawn: its fallback symbols from the symbol faces (#10), the
     /// rest in this font.
     fn width(&self, s: &str, size: f64) -> f64 {
-        shaped_text::fallback_width(s, size, |s, size| self.own_width(s, size))
+        match self {
+            RunFont::Twin { twin, standard, .. } => shaped_text::twin_width(s, size, *twin, |s, size| standard.text_width(s, size)),
+            _ => shaped_text::fallback_width(s, size, |s, size| self.own_width(s, size)),
+        }
+    }
+
+    /// `s` as this font draws it: a twin's glyphs and the rest, or fallback symbols and the rest.
+    fn pieces(&self, s: &str) -> Vec<Piece> {
+        let own = || vec![Piece::Latin(s.to_string())];
+        match self {
+            RunFont::Twin { twin, .. } => shaped_text::twin_pieces(s, *twin),
+            _ if shaped_text::has_fallback(s) => shaped_text::fallback_pieces(s).unwrap_or_else(|_| own()),
+            _ => own(),
+        }
     }
 
     /// The width of `s` in this font alone.
     fn own_width(&self, s: &str, size: f64) -> f64 {
         match self {
-            RunFont::Standard(f) => f.text_width(s, size),
+            RunFont::Standard(f) | RunFont::Twin { standard: f, .. } => f.text_width(s, size),
             RunFont::Form { text, .. } => text.width(&spaces_as(text, s), size),
         }
     }
 
     fn encode(&self, s: &str) -> Vec<u8> {
         match self {
-            RunFont::Standard(_) => win_ansi(s),
+            RunFont::Standard(_) | RunFont::Twin { .. } => win_ansi(s),
             RunFont::Form { text, .. } => text.encode(&spaces_as(text, s)),
         }
     }
@@ -1163,7 +1250,7 @@ impl RunFont {
     /// holds it (never copied or embedded anew), a standard one under Acrobat's name.
     fn resource(&self) -> (String, Object) {
         match self {
-            RunFont::Standard(f) => {
+            RunFont::Standard(f) | RunFont::Twin { standard: f, .. } => {
                 let mut fd = Dict::new();
                 fd.set(b"Type".to_vec(), Object::name("Font"));
                 fd.set(b"Subtype".to_vec(), Object::name("Type1"));
@@ -1217,15 +1304,26 @@ fn form_faces(doc: &Document) -> Vec<(String, String, bool, bool)> {
 /// standard 14 font, which keeps the weight and posture (#9: a bold run with only a regular form
 /// font is drawn in Helvetica-Bold, not in the regular face).
 fn run_font(doc: &Document, faces: &[(String, String, bool, bool)], style: &Style, text: &str) -> RunFont {
+    let standard = style.font();
+    // A face the form names but doesn't embed is drawn with its open twin (#14): the `/DR` font's
+    // own, or, with no such font in `/DR`, the twin of the name the run gives.
+    let twin =
+        |base: &str| pdfcraft_fonts::twin_for(base, style.bold, style.italic).map(|twin| RunFont::Twin { twin, standard, base: base.to_string() });
     let form = style.face.and_then(|face| {
         let want = family_key(face.as_str());
-        let (resource, ..) = faces.iter().find(|(_, family, bold, italic)| *family == want && *bold == style.bold && *italic == style.italic)?;
+        let Some((resource, ..)) = faces.iter().find(|(_, family, bold, italic)| *family == want && *bold == style.bold && *italic == style.italic)
+        else {
+            return twin(face.as_str());
+        };
         let (object, font) = dr_font(doc, resource)?;
+        if let Some((twin, base)) = form_font_twin(doc, &object) {
+            return Some(RunFont::Twin { twin, standard, base });
+        }
         // Fallback symbols are drawn from the symbol faces, whatever font the run is in.
         let own: String = text.chars().filter(|c| !shaped_text::is_fallback_symbol(*c)).collect();
         font.draws(&spaces_as(&font, &own.replace('\n', " "))).then(|| RunFont::Form { resource: resource.clone(), object, text: font })
     });
-    form.unwrap_or(RunFont::Standard(style.font()))
+    form.unwrap_or(RunFont::Standard(standard))
 }
 
 /// One laid-out line: its runs (font, style, text), how wide it is and its tallest size.
@@ -1323,9 +1421,24 @@ fn rich_appearance(doc: &Document, rich: &RichValue, frame: &str, b: Box2, multi
         })
         .collect();
     let runs = || rich.paragraphs.iter().zip(&font_of).flat_map(|(p, f)| p.spans.iter().zip(f));
-    let undrawn = runs().filter(|(_, f)| matches!(fonts.get(**f), Some(RunFont::Standard(_)))).find_map(|(s, _)| {
-        pdfcraft_fonts::first_undrawable(&s.text.chars().filter(|c| !shaped_text::is_fallback_symbol(*c)).collect::<String>().replace('\n', " "))
+    // What the standard fonts draw as `?`: in standard runs, and in twin runs what the twin lacks.
+    let undrawn = runs().find_map(|(s, f)| {
+        let font = fonts.get(*f)?;
+        let drawn_elsewhere = |c: char| match font {
+            RunFont::Twin { twin, .. } => pdfcraft_fonts::face_cluster(*twin, c).is_some(),
+            RunFont::Standard(_) => false,
+            RunFont::Form { .. } => true,
+        };
+        let own: String = s.text.chars().filter(|c| !shaped_text::is_fallback_symbol(*c) && !drawn_elsewhere(*c)).collect();
+        pdfcraft_fonts::first_undrawable(&own.replace('\n', " "))
     });
+    let twins: Vec<(String, ShapedScript)> = fonts
+        .iter()
+        .filter_map(|f| match f {
+            RunFont::Twin { twin, base, .. } => Some((base.clone(), *twin)),
+            _ => None,
+        })
+        .collect();
     let inner_w = (b.width - 2.0 * b.pad).max(1.0);
     let inner_h = (b.height - 2.0 * b.pad).max(1.0);
     // Runs without a size of their own (0, automatic) take one that fits the plain text in the
@@ -1341,15 +1454,8 @@ fn rich_appearance(doc: &Document, rich: &RichValue, frame: &str, b: Box2, multi
     // the rest in the run's font. Symbols whose outlines can't be read are left to the run's font,
     // which draws `?` for them.
     let own = |t: &String| vec![shaped_text::Piece::Latin(t.clone())];
-    let mut pieces: Vec<Vec<Vec<shaped_text::Piece>>> = lines
-        .iter()
-        .map(|l| {
-            l.runs
-                .iter()
-                .map(|(_, _, t)| if shaped_text::has_fallback(t) { shaped_text::fallback_pieces(t).unwrap_or_else(|_| own(t)) } else { own(t) })
-                .collect()
-        })
-        .collect();
+    let mut pieces: Vec<Vec<Vec<shaped_text::Piece>>> =
+        lines.iter().map(|l| l.runs.iter().map(|(f, _, t)| fonts.get(*f).map_or_else(|| own(t), |font| font.pieces(t))).collect()).collect();
     let shaped = match ShapedFonts::new(
         shaped_text::clusters(pieces.iter().flatten().map(Vec::as_slice)),
         shaped_glyph_of,
@@ -1436,7 +1542,7 @@ fn rich_appearance(doc: &Document, rich: &RichValue, frame: &str, b: Box2, multi
         format!("/Tx BMC\nq\n{frame}{} {} {} {} re W n\nBT\n", n(b.bw), n(b.bw), n(b.width - 2.0 * b.bw), n(b.height - 2.0 * b.bw)).into_bytes();
     content.extend(body);
     content.extend_from_slice(format!("ET\n{underlines}Q\nEMC\n").as_bytes());
-    RichDrawn { content, fonts: resources, overflow, undrawn }
+    RichDrawn { content, fonts: resources, overflow, undrawn, twins }
 }
 
 /// On/Off appearances for a check box or radio button that has none (a check mark or a dot,

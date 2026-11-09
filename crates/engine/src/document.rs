@@ -82,6 +82,8 @@ pub struct Document {
 pub enum EditNotice {
     /// Text stored as typed but drawn with `?`.
     Undrawn(TextNotice),
+    /// A form field drawn with the open twin of a font the file names but doesn't embed (#14).
+    Twin(TwinNotice),
     /// Remove background couldn't turn back on the white backdrop these pages (0-based,
     /// ascending) paint themselves: their content changed after the background replaced it, so
     /// turning it on could paint over something (`pdfcraft_edit::backdrops_left_off`). They look
@@ -108,6 +110,7 @@ impl std::fmt::Display for EditNotice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EditNotice::Undrawn(n) => n.fmt(f),
+            EditNotice::Twin(n) => n.fmt(f),
             EditNotice::BackdropsLeftOff { pages } => {
                 let (which, own) = if pages.len() == 1 { ("page", "its") } else { ("pages", "their") };
                 write!(
@@ -207,6 +210,66 @@ impl std::fmt::Display for TextNotice {
             ),
         }
     }
+}
+
+/// A form field whose appearance PdfCraft drew with open twins of fonts the file names but
+/// doesn't embed (`pdfcraft_forms::appearance::TWIN_MARK`): Carlito for Calibri, and so on (#14).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TwinNotice {
+    pub field: String,
+    /// The page (0-based) of the field's widget.
+    pub page: usize,
+    /// Each form font (`/BaseFont`) and the twin it was drawn with.
+    pub fonts: Vec<(String, String)>,
+}
+
+impl std::fmt::Display for TwinNotice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pairs: Vec<String> = self.fonts.iter().map(|(base, twin)| format!("{twin} for {base}")).collect();
+        write!(
+            f,
+            "form field {:?} (page {}) is drawn with {}: the file doesn't embed the form's font, so PdfCraft draws an open font with the same widths; the field's fonts are unchanged",
+            self.field,
+            self.page.saturating_add(1),
+            pairs.join(", ")
+        )
+    }
+}
+
+/// Fields whose appearance this edit drew with open twins (a new appearance carrying
+/// `pdfcraft_forms::appearance::TWIN_MARK`), one notice per field, in page order.
+pub(crate) fn twin_notices(prev: &pdfcraft_cos::Document, next: &pdfcraft_cos::Document) -> Vec<TwinNotice> {
+    let Ok(pages) = pdfcraft_annot::page_refs(next) else { return Vec::new() };
+    let mark = |doc: &pdfcraft_cos::Document, d: &pdfcraft_cos::Dict| -> Option<String> {
+        let ap = doc.resolve(d.get(b"AP")?);
+        let n = doc.resolve(ap.as_dict()?.get(b"N")?);
+        let pdfcraft_cos::Object::Stream(s) = &*n else { return None };
+        s.dict.get(pdfcraft_forms::appearance::TWIN_MARK).and_then(pdfcraft_cos::Object::as_string).map(|s| s.to_text())
+    };
+    let mut names: Option<std::collections::HashMap<pdfcraft_cos::ObjRef, String>> = None;
+    let mut out: Vec<TwinNotice> = Vec::new();
+    for (page, p) in pages.iter().enumerate() {
+        let annots = next.get(*p).as_dict().and_then(|d| d.get(b"Annots").cloned()).map(|a| next.resolve(&a));
+        for r in annots.as_deref().and_then(pdfcraft_cos::Object::as_array).into_iter().flatten().filter_map(pdfcraft_cos::Object::as_ref) {
+            let now = next.get(r);
+            let Some(d) = now.as_dict().filter(|d| d.name(b"Subtype") == Some(b"Widget")) else { continue };
+            let Some(pairs) = mark(next, d) else { continue };
+            // Only what this edit drew: a new widget, or a new appearance.
+            if prev.get(r).as_dict().is_some_and(|w| w.get(b"AP") == d.get(b"AP")) {
+                continue;
+            }
+            let names = names.get_or_insert_with(|| {
+                pdfcraft_forms::fields(next).into_iter().flat_map(|f| f.widgets.iter().map(|w| (w.obj, f.name.clone())).collect::<Vec<_>>()).collect()
+            });
+            let field = names.get(&r).cloned().unwrap_or_default();
+            if out.iter().any(|n| n.field == field) {
+                continue;
+            }
+            let fonts = pairs.split("; ").filter_map(|p| p.split_once('|')).map(|(a, b)| (a.to_string(), b.to_string())).collect();
+            out.push(TwinNotice { field, page, fonts });
+        }
+    }
+    out
 }
 
 /// What `next` drew with `?` that `prev` didn't (a new or redrawn appearance carrying
