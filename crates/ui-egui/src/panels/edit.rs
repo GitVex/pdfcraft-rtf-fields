@@ -396,7 +396,14 @@ fn added_text_format(
     paragraphs: Option<crate::format_text_ui::Paragraphs>,
 ) -> crate::format_text_ui::Outcome {
     let shown = style.family.label().to_string();
-    let out = crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown, mixed_size: false, faces: &[] }, paragraphs);
+    let out = crate::format_text_ui::panel(
+        ui,
+        t,
+        style,
+        None,
+        crate::format_text_ui::Fonts { sources: None, shown, mixed_size: false, faces: &[] },
+        paragraphs,
+    );
     if let Some(crate::format_text_ui::FontChoice::Family(family)) = out.font {
         style.family = family;
     }

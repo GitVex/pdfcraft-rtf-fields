@@ -381,7 +381,11 @@ mod tests {
         d.set_size(&(4..4), 0.0);
         assert_eq!(d.common(&(4..4), family_label), ("Courier".to_string(), false));
         d.sync("abcdX");
-        assert_eq!(d.value().paragraphs[0].spans.last().unwrap(), &Span { text: "X".into(), style: Style { family: Family::Courier, size: 18.0, ..BASE } }, "0 pt is refused");
+        assert_eq!(
+            d.value().paragraphs[0].spans.last().unwrap(),
+            &Span { text: "X".into(), style: Style { family: Family::Courier, size: 18.0, ..BASE } },
+            "0 pt is refused"
+        );
     }
 
     #[test]

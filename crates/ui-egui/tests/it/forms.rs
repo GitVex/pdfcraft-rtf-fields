@@ -2687,10 +2687,10 @@ fn a_font_from_format_text_applies_to_the_selection() {
     pick(&mut h, "Times");
     commit(&mut h);
     let runs = saved_runs(&h);
-    assert_eq!(runs.iter().map(|(t, s)| (t.as_str(), s.family, s.face.is_none(), s.bold)).collect::<Vec<_>>(), [
-        ("Sneak", Family::Times, true, true),
-        (" Attack", Family::Times, true, false)
-    ]);
+    assert_eq!(
+        runs.iter().map(|(t, s)| (t.as_str(), s.family, s.face.is_none(), s.bold)).collect::<Vec<_>>(),
+        [("Sneak", Family::Times, true, true), (" Attack", Family::Times, true, false)]
+    );
     let offered = {
         let s = h.state();
         s.session.get(s.views[0].id).unwrap().rich_font_families()
