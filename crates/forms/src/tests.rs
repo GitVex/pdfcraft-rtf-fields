@@ -2393,21 +2393,52 @@ fn a_rich_value_writes_winansi_bytes() {
     assert!(ap.windows(8).any(|x| x == b"(Z\xfcrich)"), "{}", String::from_utf8_lossy(&ap));
 }
 
-/// Issue #3: a `/RV` that can't be drawn as rich text draws the plain value, exactly as a field
-/// without one: malformed XHTML, a `/RV` for another value, and text the standard fonts can't hold.
+/// Issue #3: a `/RV` that can't be read as the rich form of the value draws the plain value,
+/// exactly as a field without one: malformed XHTML, and a `/RV` for another value.
 #[test]
-fn a_rich_value_that_cannot_be_drawn_falls_back_to_the_plain_value() {
+fn a_rich_value_that_cannot_be_read_falls_back_to_the_plain_value() {
     let plain = |value: &str| rich_field("", value, false).0;
     for (rv, value, why) in [
         (format!("{XHTML}<p><b>Ada</p></body>"), "Ada", "malformed"),
         (format!("{XHTML}<p><b>Grace</b></p></body>"), "Ada", "stale: /V changed after /RV was written"),
-        (format!("{XHTML}<p><b>Ωμέγα</b></p></body>"), "Ωμέγα", "not in the standard fonts"),
     ] {
         assert_eq!(rich_field(&rv, value, false).0, plain(value), "{why}");
     }
     let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Ada</b></p></body>"), "Ada", false);
     assert_ne!(ap, plain("Ada"), "a readable /RV is drawn rich");
     assert_eq!(fonts, ["HeBo"]);
+}
+
+/// Issue #3: a character no standard font holds (a ballot box in a character sheet's notes) is
+/// drawn as `?` in the rich value and reported, as the plain value's would be, rather than losing
+/// the formatting of the rest; Thai, which plain drawing has a face for, is drawn plain.
+#[test]
+fn a_rich_value_draws_characters_without_a_standard_glyph_as_reported_question_marks() {
+    let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Tools</b> \u{2610} Thieves</p></body>"), "Tools \u{2610} Thieves", false);
+    assert_eq!(fonts, ["HeBo", "Helv"], "still drawn rich");
+    assert!(
+        String::from_utf8_lossy(&ap).contains("(Tools) Tj") && String::from_utf8_lossy(&ap).contains("( ? Thieves) Tj"),
+        "{}",
+        String::from_utf8_lossy(&ap)
+    );
+    // The character is reported, for the caller to mark the widget and warn.
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 600.0, 250.0, 680.0], &NewField::Text { multiline: false }, Some("rich")).unwrap();
+    let obj = field(&fields(&doc), "rich").obj;
+    doc.update_dict(obj, |d| {
+        d.set(b"Ff".to_vec(), Object::Int(i64::from(flags::RICH_TEXT)));
+        d.set(b"RV".to_vec(), Object::String(PdfString::text(&format!("{XHTML}<p><b>Tools</b> \u{2610}</p></body>"))));
+    })
+    .unwrap();
+    let f = field(&fields(&doc), "rich").clone();
+    let (_, undrawn) = crate::appearance::field_appearance_drawn(&doc, &f, &f.widgets[0], &["Tools \u{2610}".to_string()], false);
+    assert_eq!(undrawn, Some('\u{2610}'));
+    let (_, fonts) = rich_field(
+        &format!("{XHTML}<p><b>\u{0e2a}\u{0e27}\u{0e31}\u{0e2a}\u{0e14}\u{0e35}</b></p></body>"),
+        "\u{0e2a}\u{0e27}\u{0e31}\u{0e2a}\u{0e14}\u{0e35}",
+        false,
+    );
+    assert!(!fonts.contains(&"HeBo".to_string()), "Thai is drawn plain: {fonts:?}");
 }
 
 /// Issue #1: a `/DA` that already names a bold or italic standard font, by resource or base font

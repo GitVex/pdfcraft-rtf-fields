@@ -1076,7 +1076,15 @@ fn rich_field_appearance(
     place: Placement,
 ) -> Option<(Stream, Option<char>, Option<Overflow>)> {
     let rich = rich_value(doc, f, da, text)?;
-    let drawn = rich_appearance(&rich, frame, b, f.has(flags::MULTILINE))?;
+    // Text the standard fonts can't hold is drawn plain where plain drawing has a font for it:
+    // Thai (its shaped face) and the form's own composite font (CJK forms). Anywhere else the
+    // plain value would show the same `?` and lose the formatting too, so the rich value is drawn
+    // with `?` for it and the character is reported, as the plain value's would be.
+    let undrawable = text.chars().any(|c| pdfcraft_fonts::first_undrawable(c.encode_utf8(&mut [0; 4])).is_some());
+    if undrawable && (text.chars().any(shaped_text::is_thai) || matches!(dr_font(doc, &da.font), Some((_, FontText::Unicode(_))))) {
+        return None;
+    }
+    let drawn = rich_appearance(&rich, frame, b, f.has(flags::MULTILINE));
     let mut d = Dict::new();
     d.set(b"Type".to_vec(), Object::name("XObject"));
     d.set(b"Subtype".to_vec(), Object::name("Form"));
@@ -1084,7 +1092,7 @@ fn rich_field_appearance(
     let mut res = Dict::new();
     res.set(b"Font".to_vec(), Object::Dict(drawn.fonts));
     d.set(b"Resources".to_vec(), Object::Dict(res));
-    Some((Stream::flate(d, &drawn.content), None, drawn.overflow))
+    Some((Stream::flate(d, &drawn.content), drawn.undrawn, drawn.overflow))
 }
 
 /// The box text is drawn in: its size, border width and padding, and its quadding (`/Q`).
@@ -1097,11 +1105,13 @@ struct Box2 {
     q: i64,
 }
 
-/// A rich value's appearance stream content, the fonts it uses and whether it is cut off.
+/// A rich value's appearance stream content, the fonts it uses, whether it is cut off, and the
+/// first character drawn as `?` because no standard font holds it.
 struct RichDrawn {
     content: Vec<u8>,
     fonts: Dict,
     overflow: Option<Overflow>,
+    undrawn: Option<char>,
 }
 
 /// One laid-out line: its runs, how wide it is and its tallest size.
@@ -1175,13 +1185,11 @@ fn line_ink(line: &RichLine, size_of: &dyn Fn(&Style) -> f64) -> f64 {
 }
 
 /// Draw `rich` in the box `b` (inside the frame `frame` already drawn), aligned by its `/Q` where
-/// a paragraph doesn't say, on wrapped lines when `multiline`. `None` when a run holds a character
-/// the standard fonts can't draw: the plain value is drawn instead, with its own font fallbacks.
-fn rich_appearance(rich: &RichValue, frame: &str, b: Box2, multiline: bool) -> Option<RichDrawn> {
+/// a paragraph doesn't say, on wrapped lines when `multiline`. A character no standard font holds
+/// is drawn and measured as `?`.
+fn rich_appearance(rich: &RichValue, frame: &str, b: Box2, multiline: bool) -> RichDrawn {
     let runs = || rich.paragraphs.iter().flat_map(|p| &p.spans);
-    if runs().any(|s| pdfcraft_fonts::first_undrawable(&s.text.replace('\n', " ")).is_some()) {
-        return None;
-    }
+    let undrawn = runs().find_map(|s| pdfcraft_fonts::first_undrawable(&s.text.replace('\n', " ")));
     let inner_w = (b.width - 2.0 * b.pad).max(1.0);
     let inner_h = (b.height - 2.0 * b.pad).max(1.0);
     // Runs without a size of their own (0, automatic) take one that fits the plain text in the
@@ -1262,7 +1270,7 @@ fn rich_appearance(rich: &RichValue, frame: &str, b: Box2, multiline: bool) -> O
         format!("/Tx BMC\nq\n{frame}{} {} {} {} re W n\nBT\n", n(b.bw), n(b.bw), n(b.width - 2.0 * b.bw), n(b.height - 2.0 * b.bw)).into_bytes();
     content.extend(body);
     content.extend_from_slice(format!("ET\n{underlines}Q\nEMC\n").as_bytes());
-    Some(RichDrawn { content, fonts, overflow })
+    RichDrawn { content, fonts, overflow, undrawn }
 }
 
 /// On/Off appearances for a check box or radio button that has none (a check mark or a dot,
