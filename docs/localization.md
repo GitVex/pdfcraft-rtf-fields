@@ -93,4 +93,4 @@ Error details that come from the operating system, and faults rather than mistak
 
 The Preferences dropdown, the system-language match and the translation gaps report then pick it up.
 
-The egui 0.37 migration pins craft-fonts `b076417b5880bd4154bd22f00695b1d28c6bea83`. That manifest supplies Arabic, Hebrew, Thai and Devanagari faces selected for the web payload, but contains no Telugu face. The build code accepts a `Telu` row when a future input provides one; it does not establish Telugu glyph coverage with the current pin.
+CI and release builds pin craft-fonts `aced4137c022f1f587624d48e81ec77e1914a9cc`: the egui 0.37 migration's `b076417b5880bd4154bd22f00695b1d28c6bea83` with craft-fonts' Latin font manifest (`fonts/latin-manifest.txt`) restored, its main manifest unchanged. That manifest supplies Arabic, Hebrew, Thai and Devanagari faces selected for the web payload, but contains no Telugu face. The build code accepts a `Telu` row when a future input provides one; it does not establish Telugu glyph coverage with the current pin.
