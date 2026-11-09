@@ -60,9 +60,11 @@ pub fn thai_pieces(line: &str) -> Result<Vec<Piece>, GlyphError> {
 }
 
 /// Whether `c` is a symbol drawn from a craft-fonts symbol face: no standard font has it (it isn't
-/// in WinAnsi) and a symbol face does. Thai is left to [`thai_pieces`].
+/// in WinAnsi) and a symbol face does. Thai is left to [`thai_pieces`]. Letters, digits and
+/// combining marks never are: the symbol faces map some Latin letters too (Noto Sans Symbols has
+/// `ř`), and a letter drawn in a symbols font is not the text's own (#19).
 pub fn is_fallback_symbol(c: char) -> bool {
-    !is_thai(c) && !crate::win_ansi_encodable(c) && crate::symbol_face_for(c).is_some()
+    !is_thai(c) && !c.is_alphanumeric() && !matches!(c, '\u{300}'..='\u{36f}') && !crate::win_ansi_encodable(c) && crate::symbol_face_for(c).is_some()
 }
 
 /// Whether `text` has Thai or a [fallback symbol](is_fallback_symbol): characters that
@@ -507,6 +509,17 @@ mod tests {
 
     fn cluster(text: &str, id: u32) -> ShapedCluster {
         ShapedCluster { script: ShapedScript::Thai, glyphs: vec![(id, [0.0, 0.0])], advance: 0.5, text: text.into() }
+    }
+
+    /// #19: letters a symbol face happens to map (Noto Sans Symbols has `ř`) aren't symbols, so
+    /// they are drawn and reported as the text's own font draws them; ☐ still is one.
+    #[test]
+    fn letters_are_never_fallback_symbols() {
+        for c in ['ř', 'Ř', 'č', 'ě', 'ő', 'Ł', '\u{30c}', '٣'] {
+            assert!(!is_fallback_symbol(c), "{c:?}");
+        }
+        assert_eq!(is_fallback_symbol('\u{2610}'), crate::symbol_face_for('\u{2610}').is_some());
+        assert_eq!(fallback_pieces("Plzeň").ok(), Some(vec![Piece::Latin("Plzeň".into())]));
     }
 
     #[test]
