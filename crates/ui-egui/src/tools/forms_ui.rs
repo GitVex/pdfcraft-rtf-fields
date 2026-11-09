@@ -395,7 +395,8 @@ pub(crate) fn load_rich(doc: &pdfcraft_engine::Document, view: &mut DocView, for
     fx.rich_loaded = true;
     let Some(f) = rich_field(fx, form) else { return };
     let base = pdfcraft_engine::form_rich::Style::of_da(&f.da);
-    let draft = super::rich_field::RichDraft::open(doc.field_rich_value(&f.name).as_ref(), base, &fx.text);
+    let mut draft = super::rich_field::RichDraft::open(doc.field_rich_value(&f.name).as_ref(), base, &fx.text);
+    draft.fonts = doc.rich_font_families();
     fx.text = draft.editor_text().to_string();
     fx.rich = Some(draft);
 }
@@ -405,23 +406,32 @@ pub(crate) fn editing_rich(view: &DocView) -> bool {
     view.forms.focus.as_ref().is_some_and(|x| x.rich.is_some())
 }
 
-/// Bold, italic and underline from the Format text panel for the rich text field being edited
-/// (#11): shown for its selection, or for the text typed next at the caret, and applied to it. The
-/// editor then takes the keyboard back, keeping its selection.
+/// The Format text panel for the rich text field being edited: bold, italic and underline
+/// (#11), and size, colour and font family (#12), shown for its selection (a mixed selection as
+/// mixed), or for the text typed next at the caret, and applied to it. The editor then takes
+/// the keyboard back, keeping its selection.
 pub(crate) fn format_panel(view: &mut DocView, ui: &mut egui::Ui, t: &crate::theme::Tokens) {
-    use super::rich_field::Toggle;
+    use super::rich_field::{FontPick, Toggle, family_label};
+    use crate::format_text_ui::FontChoice;
     let Some(fx) = view.forms.focus.as_mut() else { return };
     let selection = fx.selection.clone();
     let Some(draft) = fx.rich.as_mut() else { return };
+    let (size, mixed_size) = draft.common(&selection, |s| s.size.to_bits());
+    let (color, _) = draft.common(&selection, |s| s.color.map(f64::to_bits));
+    let (family, mixed_family) = draft.common(&selection, family_label);
     let mut look = pdfcraft_engine::AddedText {
         bold: draft.is_on(&selection, Toggle::Bold),
         italic: draft.is_on(&selection, Toggle::Italic),
+        size: f64::from_bits(size),
+        color: color.map(f64::from_bits),
         ..Default::default()
     };
     let mut extras = crate::edit_text_ui::Extras { underline: draft.is_on(&selection, Toggle::Underline), ..Default::default() };
-    let before = (look.bold, look.italic, extras.underline);
-    let fonts = crate::format_text_ui::Fonts { sources: None, shown: look.family.label().to_string(), mixed_size: false };
-    crate::format_text_ui::panel(ui, t, &mut look, Some(&mut extras), fonts, None);
+    let before = (look.bold, look.italic, extras.underline, look.color);
+    let shown = if mixed_family { tl!("Mixed").to_string() } else { family };
+    let faces = draft.fonts.clone();
+    let fonts = crate::format_text_ui::Fonts { sources: None, shown, mixed_size, faces: &faces };
+    let out = crate::format_text_ui::panel(ui, t, &mut look, Some(&mut extras), fonts, None);
     let mut changed = false;
     for (what, was, now) in
         [(Toggle::Bold, before.0, look.bold), (Toggle::Italic, before.1, look.italic), (Toggle::Underline, before.2, extras.underline)]
@@ -430,6 +440,27 @@ pub(crate) fn format_panel(view: &mut DocView, ui: &mut egui::Ui, t: &crate::the
             draft.toggle(&selection, what);
             changed = true;
         }
+    }
+    if out.size_committed {
+        draft.set_size(&selection, look.size);
+        changed = true;
+    }
+    if look.color != before.3 {
+        draft.set_color(&selection, look.color);
+        changed = true;
+    }
+    let pick = match out.font {
+        Some(FontChoice::Family(f)) => Some(FontPick::Standard(match f {
+            pdfcraft_engine::FontFamily::Helvetica => pdfcraft_engine::form_rich::Family::Helvetica,
+            pdfcraft_engine::FontFamily::Times => pdfcraft_engine::form_rich::Family::Times,
+            pdfcraft_engine::FontFamily::Courier => pdfcraft_engine::form_rich::Family::Courier,
+        })),
+        Some(FontChoice::Face(name)) => Some(FontPick::Named(name)),
+        _ => None,
+    };
+    if let Some(pick) = pick {
+        draft.set_family(&selection, &pick);
+        changed = true;
     }
     if changed {
         fx.request_focus = true;

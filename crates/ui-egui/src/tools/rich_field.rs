@@ -8,10 +8,31 @@
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontFamily, FontId, Stroke};
-use pdfcraft_engine::form_rich::{Align, Paragraph, RichValue, Span, Style};
+use pdfcraft_engine::form_rich::{Align, Face, Family, Paragraph, RichValue, Span, Style};
 
 /// What a character looks like, and the alignment of the paragraph it is in.
 type Look = (Style, Option<Align>);
+
+/// A font family picked for text: a standard one, or one named (a form font or a craft-fonts
+/// family).
+#[derive(Clone, Debug, PartialEq)]
+pub enum FontPick {
+    Standard(Family),
+    Named(String),
+}
+
+/// The name the font list shows for `style`'s family.
+pub fn family_label(style: &Style) -> String {
+    match style.face {
+        Some(face) => face.as_str().to_string(),
+        None => match style.family {
+            Family::Helvetica => "Helvetica",
+            Family::Times => "Times",
+            Family::Courier => "Courier",
+        }
+        .to_string(),
+    }
+}
 
 /// A style the Format text panel turns on or off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +72,9 @@ pub struct RichDraft {
     next: Option<Look>,
     /// The text and looks the editor opened with, to tell whether anything changed.
     opened: (String, Vec<Look>),
+    /// The named font families the font list offers (#12): the form's fonts, then the
+    /// craft-fonts families.
+    pub fonts: Vec<String>,
 }
 
 impl RichDraft {
@@ -82,7 +106,7 @@ impl RichDraft {
                 (text, looks)
             }
         };
-        RichDraft { opened: (text.clone(), looks.clone()), looks, text, base, next: None }
+        RichDraft { opened: (text.clone(), looks.clone()), looks, text, base, next: None, fonts: Vec::new() }
     }
 
     /// The editor's text: the field's plain text, a line per paragraph.
@@ -138,15 +162,63 @@ impl RichDraft {
     /// empty range, for the text typed next at its place.
     pub fn toggle(&mut self, range: &std::ops::Range<usize>, what: Toggle) {
         let on = !self.is_on(range, what);
+        self.restyle(range, |s| what.set(s, on));
+    }
+
+    /// What `of` reads from the styles of `range` (characters): the first character's, and
+    /// whether the others differ from it (a mixed selection); the look at the caret for an empty
+    /// range, as [`Self::is_on`] takes it.
+    pub fn common<T: PartialEq>(&self, range: &std::ops::Range<usize>, of: impl Fn(&Style) -> T) -> (T, bool) {
+        let looks = self.looks.get(range.clone()).filter(|l| !l.is_empty());
+        let Some((first, rest)) = looks.and_then(<[Look]>::split_first) else {
+            return (of(&self.caret_look(range.start).0), false);
+        };
+        let value = of(&first.0);
+        let mixed = rest.iter().any(|(s, _)| of(s) != value);
+        (value, mixed)
+    }
+
+    /// Set the size (points) of `range`, or of the text typed next with an empty range.
+    pub fn set_size(&mut self, range: &std::ops::Range<usize>, size: f64) {
+        if size.is_finite() && size > 0.0 {
+            self.restyle(range, |s| s.size = size);
+        }
+    }
+
+    /// Set the colour (RGB, 0–1) of `range`, or of the text typed next with an empty range.
+    pub fn set_color(&mut self, range: &std::ops::Range<usize>, color: [f64; 3]) {
+        let color = color.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.0 });
+        self.restyle(range, |s| s.color = color);
+    }
+
+    /// Set the font family of `range`, or of the text typed next with an empty range, keeping
+    /// its weight and posture. A named family keeps a standard one to stand in for it where the
+    /// form has no font of that name.
+    pub fn set_family(&mut self, range: &std::ops::Range<usize>, pick: &FontPick) {
+        let (family, face) = match pick {
+            FontPick::Standard(family) => (*family, None),
+            FontPick::Named(name) => match Face::named(name) {
+                Some(face) => (Family::standing_in_for(name), Some(face)),
+                None => return,
+            },
+        };
+        self.restyle(range, |s| {
+            s.family = family;
+            s.face = face;
+        });
+    }
+
+    /// Change the styles of `range`, or the look of the text typed next at an empty range.
+    fn restyle(&mut self, range: &std::ops::Range<usize>, change: impl Fn(&mut Style)) {
         if range.is_empty() {
             let mut look = self.caret_look(range.start);
-            what.set(&mut look.0, on);
+            change(&mut look.0);
             self.next = Some(look);
             return;
         }
         let end = range.end.min(self.looks.len());
         for (s, _) in self.looks.get_mut(range.start.min(end)..end).into_iter().flatten() {
-            what.set(s, on);
+            change(s);
         }
     }
 
@@ -196,7 +268,11 @@ impl RichDraft {
             let from = chars.get(start).map_or(text.len(), |c| c.0);
             let to = chars.get(end).map_or(text.len(), |c| c.0);
             let size = if look.size > 0.0 { look.size as f32 * scale } else { auto };
-            let family = if look.bold { FontFamily::Name("semibold".into()) } else { FontFamily::Proportional };
+            let family = match (look.bold, look.family) {
+                (true, _) => FontFamily::Name("semibold".into()),
+                (false, Family::Courier) => FontFamily::Monospace,
+                (false, _) => FontFamily::Proportional,
+            };
             let [r, g, b] = look.color.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8);
             let color = Color32::from_rgb(r, g, b);
             let format = TextFormat {
@@ -278,6 +354,34 @@ mod tests {
         assert_eq!(v.paragraphs.len(), 2);
         assert_eq!(v.paragraphs[1].spans, [Span { text: "two".into(), style: bold() }]);
         assert_eq!(v.plain_text(), "one\rtwo");
+    }
+
+    #[test]
+    fn size_colour_and_family_apply_to_a_selection_or_to_what_is_typed_next() {
+        let mut d = RichDraft::open(Some(&rich(&[("ab", bold()), ("cd", BASE)])), BASE, "abcd");
+        assert_eq!(d.common(&(0..4), |s| s.bold), (true, true), "mixed weights");
+        d.set_size(&(2..4), 18.0);
+        assert_eq!(d.common(&(0..4), |s| s.size.to_bits()), (10.0f64.to_bits(), true), "two sizes are mixed");
+        d.set_color(&(1..3), [1.0, 0.0, 0.0]);
+        d.set_family(&(0..4), &FontPick::Named("Liberation Serif".into()));
+        let red = [1.0, 0.0, 0.0];
+        let serif = |s: Style| Style { family: Family::Times, face: Face::named("Liberation Serif"), ..s };
+        assert_eq!(
+            d.value(),
+            rich(&[
+                ("a", serif(bold())),
+                ("b", serif(Style { color: red, ..bold() })),
+                ("c", serif(Style { color: red, size: 18.0, ..BASE })),
+                ("d", serif(Style { size: 18.0, ..BASE })),
+            ])
+        );
+        assert_eq!(d.common(&(0..4), family_label), ("Liberation Serif".to_string(), false));
+        // Nothing selected: the change is for what is typed next there.
+        d.set_family(&(4..4), &FontPick::Standard(Family::Courier));
+        d.set_size(&(4..4), 0.0);
+        assert_eq!(d.common(&(4..4), family_label), ("Courier".to_string(), false));
+        d.sync("abcdX");
+        assert_eq!(d.value().paragraphs[0].spans.last().unwrap(), &Span { text: "X".into(), style: Style { family: Family::Courier, size: 18.0, ..BASE } }, "0 pt is refused");
     }
 
     #[test]

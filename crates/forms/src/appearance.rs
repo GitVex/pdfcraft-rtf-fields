@@ -1308,6 +1308,36 @@ fn form_faces(doc: &Document) -> Vec<(String, String, bool, bool)> {
         .collect()
 }
 
+/// The font families a rich text run can be set to beyond the standard ones (#12): the form's
+/// own `/DR` fonts by family (`Calibri`), then the craft-fonts families this build has
+/// (`Carlito`, `Liberation Sans`), each once.
+pub fn rich_families(doc: &Document) -> Vec<String> {
+    let fonts = acroform(doc).and_then(|af| {
+        let dr = doc.resolve(af.get(b"DR")?);
+        doc.resolve(dr.as_dict()?.get(b"Font")?).as_dict().cloned()
+    });
+    let own = fonts.iter().flat_map(|fonts| fonts.iter()).filter_map(|(_, entry)| {
+        let base = doc.resolve(entry).as_dict()?.name(b"BaseFont").map(|b| String::from_utf8_lossy(b).into_owned())?;
+        let base = base.split_once('+').filter(|(tag, _)| tag.len() == 6).map_or(base.as_str(), |(_, rest)| rest).to_string();
+        Some(base.split_once(['-', ',']).map_or(base.as_str(), |(family, _)| family).to_string())
+    });
+    let craft = pdfcraft_fonts::embedding::field_faces().iter().map(|f| f.font.family.to_string());
+    let mut out: Vec<String> = Vec::new();
+    for family in own.chain(craft) {
+        // A standard family (`Helvetica`, `Helv`) is offered as one already.
+        if rich::Face::named(&family).is_some() && !out.iter().any(|f| family_key(f) == family_key(&family)) {
+            out.push(family);
+        }
+    }
+    out
+}
+
+/// Whether the form has a `/DR` font for the face `face` in that weight and posture.
+pub(crate) fn has_form_face(doc: &Document, face: &str, bold: bool, italic: bool) -> bool {
+    let want = family_key(face);
+    form_faces(doc).iter().any(|(_, family, b, i)| *family == want && *b == bold && *i == italic)
+}
+
 /// The font for a run in `style` showing `text`: the form's font of the face it names in that
 /// weight and posture, when the form has one that holds every character of the text; else the
 /// standard 14 font, which keeps the weight and posture (#9: a bold run with only a regular form

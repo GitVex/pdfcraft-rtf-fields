@@ -217,7 +217,7 @@ fn formatted_text_through_form_fill() {
     for (args, says) in [
         (json!({"alpha": [{"text": "x", "weight": 700}]}), "runs take text, bold"),
         (json!({"alpha": [{"text": "x", "size": 900}]}), "size must be 1 to 300"),
-        (json!({"alpha": [{"text": "x", "font": "comic"}]}), "helvetica, times or courier"),
+        (json!({"alpha": [{"text": "x", "font": "comic"}]}), "one of helvetica, times, courier"),
         (json!({"alpha": []}), "give 1 to"),
         (json!({"alpha": "plain"}), "array of runs"),
     ] {
@@ -226,6 +226,39 @@ fn formatted_text_through_form_fill() {
     }
     let err = a.call("form_fill", &json!({"doc": id, "values": {"alpha": "a"}, "rich": {"alpha": [{"text": "b"}]}})).unwrap_err();
     assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("both values and rich")), "{err:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Issue #12: `form_fields` lists the families rich runs can use (`rich_fonts`), and a run in one
+/// of the craft-fonts families is drawn in that face, which the form then holds, through save and
+/// reopen. Without craft-fonts there are none to list, and the name is refused.
+#[test]
+fn a_craft_family_through_form_fill_rich() {
+    let (mut a, id, dir) = setup("rich-craft");
+    let listed = tool(&mut a, "form_fields", json!({"doc": id}))["rich_fonts"].clone();
+    let fill = json!({"doc": id, "rich": {"alpha": [{"text": "plain "}, {"text": "Sneak", "bold": true, "font": "carlito"}]}});
+    if !listed.as_array().unwrap().iter().any(|f| f == "Carlito") {
+        assert_eq!(listed, json!([]), "the fixture has standard fonts only");
+        let err = a.call("form_fill", &fill).unwrap_err();
+        assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("one of helvetica, times, courier")), "{err:?}");
+        std::fs::remove_dir_all(dir).ok();
+        return;
+    }
+    tool(&mut a, "form_fill", fill.clone());
+    tool(&mut a, "doc_save", json!({"doc": id, "path": "rich-craft.pdf"}));
+    let reopened = tool(&mut a, "doc_open", json!({"path": "rich-craft.pdf"}))["doc"].as_u64().unwrap();
+    let fields = tool(&mut a, "form_fields", json!({"doc": reopened}));
+    assert_eq!(fields["rich_fonts"].as_array().unwrap().iter().filter(|f| *f == "Carlito").count(), 1, "{fields}");
+    let s = a.session();
+    let doc = s.get(pdfcraft_engine::DocId(reopened)).unwrap();
+    let rich = doc.field_rich_value("alpha").expect("a rich value");
+    let runs: Vec<(String, Option<String>, bool)> = rich
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.spans)
+        .map(|r| (r.text.clone(), r.style.face.map(|f| f.as_str().to_string()), r.style.bold))
+        .collect();
+    assert_eq!(runs[1], ("Sneak".to_string(), Some("Carlito".to_string()), true), "{runs:?}");
     std::fs::remove_dir_all(dir).ok();
 }
 

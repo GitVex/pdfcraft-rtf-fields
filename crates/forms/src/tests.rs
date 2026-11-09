@@ -2842,6 +2842,44 @@ fn an_unknown_craft_font_is_refused() {
     assert_eq!(field(&fields(&doc), "a").da, before);
 }
 
+/// Issue #12: a run set to a craft-fonts family the form doesn't have is drawn in that face: its
+/// face in the run's weight is embedded in `/DR` on commit, as for a field set to it (#7), once
+/// however often it is used; the family is offered for runs from then on as the form's own.
+#[test]
+fn a_rich_run_in_a_craft_family_embeds_that_face() {
+    use crate::rich::{Face, Family, Paragraph, RichValue, Span, Style};
+    let mut doc = fixture();
+    let plain = Style { family: Family::Helvetica, face: None, bold: false, italic: false, size: 10.0, color: [0.0; 3], underline: false };
+    let carlito = Style { face: Face::named("Carlito"), bold: true, ..plain };
+    let value = |n: &str| {
+        let spans = vec![Span { text: "plain ".into(), style: plain }, Span { text: n.into(), style: carlito }];
+        FieldValue::Rich(RichValue { paragraphs: vec![Paragraph { align: None, spans }] })
+    };
+    set_value(&mut doc, "notes", &value("bold")).unwrap();
+    let Some(_) = craft_font("carlito-bold") else {
+        // Without craft-fonts there is nothing to embed: the run keeps its weight in Helvetica.
+        let f = field(&fields(&doc), "notes").clone();
+        assert!(ap(&doc, &f.widgets[0]).contains("/HeBo 10 Tf"));
+        assert!(crate::appearance::rich_families(&doc).is_empty());
+        return;
+    };
+    set_value(&mut doc, "notes", &value("again")).unwrap();
+    let doc = reopen(&doc);
+    let f = field(&fields(&doc), "notes").clone();
+    let a = ap(&doc, &f.widgets[0]);
+    assert!(a.contains("/Carlito-Bold 10 Tf") && a.contains("(again) Tj") && a.contains("/Helv 10 Tf"), "{a}");
+    let programs = doc
+        .object_numbers()
+        .into_iter()
+        .filter(|&n| matches!(&*doc.get(ObjRef::new(n, 0)), Object::Stream(s) if s.dict.contains(b"Length1")))
+        .count();
+    assert_eq!(programs, 1, "embedded once");
+    let read = crate::appearance::field_rich_value(&doc, &f).unwrap();
+    assert_eq!(read.paragraphs[0].spans[1].style.face.map(|f| f.as_str().to_string()).as_deref(), Some("Carlito"));
+    let families = crate::appearance::rich_families(&doc);
+    assert_eq!(families.iter().filter(|f| f.as_str() == "Carlito").count(), 1, "offered once: {families:?}");
+}
+
 /// Carlito's widths for WinAnsi codes 32–255, as a `/Widths` array: what a real Calibri has, since
 /// Carlito is made with Calibri's widths. `None` without the craft-fonts Latin faces.
 fn carlito_widths() -> Option<String> {

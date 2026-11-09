@@ -210,6 +210,22 @@ impl FieldFont {
         FieldFont::ALL.into_iter().chain(craft).collect()
     }
 
+    /// The craft-fonts face of `family` (`Carlito`, `Liberation Sans`) in that weight and
+    /// posture, if this build has it.
+    pub(crate) fn craft_for(family: &str, bold: bool, italic: bool) -> Option<FieldFont> {
+        let key = pdfcraft_fonts::embedding::face_key(family);
+        let style = match (bold, italic) {
+            (false, false) => "Regular",
+            (true, false) => "Bold",
+            (false, true) => "Italic",
+            (true, true) => "Bold Italic",
+        };
+        let n = pdfcraft_fonts::embedding::field_faces()
+            .iter()
+            .position(|f| pdfcraft_fonts::embedding::face_key(f.font.family) == key && f.font.style.eq_ignore_ascii_case(style))?;
+        u16::try_from(n).ok().map(FieldFont::Craft)
+    }
+
     /// The craft-fonts face this is, if it is one this build has.
     pub(crate) fn craft_face(self) -> Option<&'static pdfcraft_fonts::embedding::FieldFace> {
         match self {

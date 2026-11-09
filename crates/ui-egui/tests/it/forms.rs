@@ -2585,6 +2585,121 @@ fn bold_from_the_format_panel_formats_a_rich_fields_selection() {
     assert_eq!(bold_runs(&h), ["Sneak"]);
 }
 
+/// The runs of the field "notes" (text, style) after saving the document and opening the saved
+/// bytes in a fresh app.
+fn saved_runs(h: &Harness<'static, PdfCraftApp>) -> Vec<(String, pdfcraft_engine::form_rich::Style)> {
+    let s = h.state();
+    let bytes = s.session.save_bytes(s.views[0].id).unwrap();
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.open_bytes("saved.pdf", None, bytes.to_vec()).unwrap();
+    let rich = app.session.get(app.views[0].id).unwrap().field_rich_value("notes").expect("a rich value");
+    rich.paragraphs.iter().flat_map(|p| &p.spans).map(|r| (r.text.clone(), r.style)).collect()
+}
+
+/// Select the last `n` characters of the field being edited, from the keyboard.
+fn select_last(h: &mut Harness<'static, PdfCraftApp>, n: usize) {
+    h.key_press(egui::Key::End);
+    h.run_steps(1);
+    for _ in 0..n {
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowLeft);
+        h.run_steps(1);
+    }
+}
+
+/// Commit the field being edited, as Tab does.
+fn commit(h: &mut Harness<'static, PdfCraftApp>) {
+    h.key_press(egui::Key::Tab);
+    h.run_steps(4);
+    assert!(h.state().views[0].forms.focus.as_ref().is_none_or(|f| f.rich.is_none()), "committed");
+}
+
+/// Issue #12: a size picked in Format text applies to the selected part of a line only, and is
+/// kept by the saved file; a selection of two sizes then shows its size as mixed.
+#[test]
+fn a_size_from_format_text_applies_to_part_of_a_line() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    select_last(&mut h, 6);
+    let arrow = h.get_by_label("Font size").rect().center();
+    click_at(&mut h, arrow);
+    h.run_steps(2);
+    let preset = h.get_by_label("18 pt").rect().center();
+    click_at(&mut h, preset);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_some(), "the field stays open");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    assert!(h.query_by_value("Mixed").is_some(), "two sizes selected show as mixed");
+    commit(&mut h);
+    let runs: Vec<(String, f64)> = saved_runs(&h).into_iter().map(|(t, s)| (t, s.size)).collect();
+    assert_eq!(runs, [("Sneak".to_string(), 12.0), (" ".to_string(), 12.0), ("Attack".to_string(), 18.0)]);
+}
+
+/// Issue #12: a colour picked in Format text applies across both runs of the selection, each
+/// keeping its own weight, and is kept by the saved file.
+#[test]
+fn a_colour_from_format_text_applies_across_two_runs() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    let swatch = h.get_by_label("Colour").rect().center();
+    click_at(&mut h, swatch);
+    h.run_steps(2);
+    let red = h.get_by_label("Red").rect().center();
+    click_at(&mut h, red);
+    h.run_steps(2);
+    commit(&mut h);
+    let runs = saved_runs(&h);
+    assert_eq!(runs.iter().map(|(t, s)| (t.as_str(), s.bold)).collect::<Vec<_>>(), [("Sneak", true), (" Attack", false)]);
+    for (text, style) in &runs {
+        let [r, g, b] = style.color;
+        assert!((r - 0.89).abs() < 0.01 && (g - 0.13).abs() < 0.01 && (b - 0.13).abs() < 0.01, "{text} is red: {:?}", style.color);
+    }
+}
+
+/// Issue #12: a font family picked in Format text applies to the selection, keeping its weight:
+/// a standard one (Times), and, with the craft-fonts Latin faces, one of those (Carlito), which the
+/// saved file then embeds.
+#[test]
+fn a_font_from_format_text_applies_to_the_selection() {
+    use pdfcraft_engine::form_rich::Family;
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    let pick = |h: &mut Harness<'static, PdfCraftApp>, name: &str| {
+        let list = h.get_by_label("Font").rect().center();
+        click_at(h, list);
+        h.run_steps(2);
+        let item = h.get_by_label(name).rect().center();
+        click_at(h, item);
+        h.run_steps(2);
+    };
+    pick(&mut h, "Times");
+    commit(&mut h);
+    let runs = saved_runs(&h);
+    assert_eq!(runs.iter().map(|(t, s)| (t.as_str(), s.family, s.face.is_none(), s.bold)).collect::<Vec<_>>(), [
+        ("Sneak", Family::Times, true, true),
+        (" Attack", Family::Times, true, false)
+    ]);
+    let offered = {
+        let s = h.state();
+        s.session.get(s.views[0].id).unwrap().rich_font_families()
+    };
+    if !offered.iter().any(|f| f == "Carlito") {
+        return;
+    }
+    click_field(&mut h, "notes", 0);
+    select_last(&mut h, 6);
+    pick(&mut h, "Carlito");
+    commit(&mut h);
+    let runs = saved_runs(&h);
+    let faces: Vec<(&str, Option<&str>)> = runs.iter().map(|(t, s)| (t.as_str(), s.face.as_ref().map(|f| f.as_str()))).collect();
+    assert_eq!(faces, [("Sneak", None), (" ", None), ("Attack", Some("Carlito"))]);
+}
+
 /// How many top-level bookmarks the document has.
 fn bookmark_count(h: &Harness<'static, PdfCraftApp>) -> usize {
     let s = h.state();

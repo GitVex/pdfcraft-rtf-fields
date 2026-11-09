@@ -279,7 +279,7 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             t,
             &mut ed.look,
             Some(&mut ed.extras),
-            Fonts { sources: Some(&sources), shown, mixed_size },
+            Fonts { sources: Some(&sources), shown, mixed_size, faces: &[] },
             Some(paragraphs),
         );
         if out.size_committed {
@@ -302,6 +302,8 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
                 ed.choose_family(family);
                 changed = true;
             }
+            // Offered for rich text fields only.
+            Some(FontChoice::Face(_)) => {}
             Some(FontChoice::Load) => app.pick_files(crate::files::FilePurpose::TextFont { page: ed.page }, false),
             #[cfg(not(target_arch = "wasm32"))]
             Some(FontChoice::Installed(path)) => app.use_paths(crate::files::FilePurpose::TextFont { page: ed.page }, &[path]),
@@ -394,7 +396,7 @@ fn added_text_format(
     paragraphs: Option<crate::format_text_ui::Paragraphs>,
 ) -> crate::format_text_ui::Outcome {
     let shown = style.family.label().to_string();
-    let out = crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown, mixed_size: false }, paragraphs);
+    let out = crate::format_text_ui::panel(ui, t, style, None, crate::format_text_ui::Fonts { sources: None, shown, mixed_size: false, faces: &[] }, paragraphs);
     if let Some(crate::format_text_ui::FontChoice::Family(family)) = out.font {
         style.family = family;
     }

@@ -749,6 +749,12 @@ impl Document {
         pdfcraft_forms::appearance::field_rich_value(&e.cos, f)
     }
 
+    /// The font families a rich text field's runs can be set to besides Helvetica, Times and
+    /// Courier (#12): the form's own fonts, then the craft-fonts families this build has.
+    pub fn rich_font_families(&self) -> Vec<String> {
+        self.editor.as_ref().map(|e| pdfcraft_forms::appearance::rich_families(&e.cos)).unwrap_or_default()
+    }
+
     /// A check box's or radio button's mark (Field Properties ▸ Options), `None` for other fields.
     pub fn field_check_style(&self, name: &str) -> Option<CheckStyle> {
         let e = self.editor.as_ref()?;
