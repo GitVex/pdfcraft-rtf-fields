@@ -3,7 +3,8 @@
 //! Text and choice fields are drawn from their `/DA` (font, size, colour) and the widget's `/MK`
 //! (background and border colours) and `/BS` (border width and style), inside a `/Tx BMC … EMC`
 //! marked-content block as viewers expect. Supported: single-line, multiline (wrapped), comb,
-//! password, quadding, auto font size (`0 Tf`), combo boxes and list boxes (selection shown).
+//! password, quadding, auto font size (`0 Tf`), combo boxes and list boxes (selection shown), and
+//! rich text values (`/RV`, read by [`crate::rich`]) in their own standard fonts, sizes and colours.
 //!
 //! The `/DA` font is used when the form's `/DR` defines it as a simple font that can encode the
 //! displayed text (using its own encoding and Differences), or as a composite font with a
@@ -26,6 +27,7 @@ use pdfcraft_fonts::pdf::Metrics;
 use pdfcraft_fonts::shaped_text::{self, Piece, ShapedFonts};
 use pdfcraft_fonts::{UnicodeCMap, cjk_width, helvetica_width, literal, win_ansi, wrap_with};
 
+use crate::rich::{self, RichValue, Style};
 use crate::{Field, FieldKind, Widget, acroform, flags};
 
 /// Format a number for content streams.
@@ -771,27 +773,28 @@ pub(crate) fn thai_refusal(doc: &Document, f: &Field, text: &str) -> Option<Stri
     if f.widgets.iter().all(held) { None } else { shaped_text::thai_refusal(text) }
 }
 
+/// The values a field shows: with `format`, a text field's or combo box's single value as its
+/// Format event shows it, not as it is stored.
+fn shown_values<'a>(doc: &Document, f: &Field, wd: &Dict, values: &'a [String], format: bool) -> std::borrow::Cow<'a, [String]> {
+    match values {
+        [value] if format && matches!(f.kind, crate::FieldKind::Text | crate::FieldKind::Combo) && f.actions.format != crate::af::Format::None => {
+            let shown = f.actions.format_value(value);
+            // Month and weekday names in the date language that no font here can draw ("окт." in
+            // Helvetica) are drawn in English rather than as `?` (#5303).
+            let english = || f.actions.format_value_in(value, &crate::af::ENGLISH_DATE_NAMES);
+            let dated = matches!(f.actions.format, crate::af::Format::Date(_) | crate::af::Format::Time(_));
+            std::borrow::Cow::Owned(vec![if !dated || draws(doc, f, wd, &shown) { shown } else { english() }])
+        }
+        _ => std::borrow::Cow::Borrowed(values),
+    }
+}
+
 /// [`field_appearance_drawn`], and whether the text drawn is cut off by the box.
 fn field_appearance_fit(doc: &Document, f: &Field, w: &Widget, values: &[String], format: bool) -> (Stream, Option<char>, Option<Overflow>) {
     let wobj = doc.get(w.obj);
     let wd = wobj.as_dict().cloned().unwrap_or_default();
-    // The Format event: what is shown, not what is stored.
-    let formatted: Vec<String>;
-    let values = if format
-        && matches!(f.kind, crate::FieldKind::Text | crate::FieldKind::Combo)
-        && values.len() == 1
-        && f.actions.format != crate::af::Format::None
-    {
-        let shown = f.actions.format_value(&values[0]);
-        // Month and weekday names in the date language that no font here can draw ("окт." in
-        // Helvetica) are drawn in English rather than as `?` (#5303).
-        let english = || f.actions.format_value_in(&values[0], &crate::af::ENGLISH_DATE_NAMES);
-        let dated = matches!(f.actions.format, crate::af::Format::Date(_) | crate::af::Format::Time(_));
-        formatted = vec![if !dated || draws(doc, f, &wd, &shown) { shown } else { english() }];
-        &formatted[..]
-    } else {
-        values
-    };
+    let shown = shown_values(doc, f, &wd, values, format);
+    let values: &[String] = &shown;
     let (page_w, page_h) = ((w.rect[2] - w.rect[0]).max(1.0), (w.rect[3] - w.rect[1]).max(1.0));
     let place = placement(mk_rotation(doc, &wd), page_w, page_h);
     let (width, height) = (place.layout_w, place.layout_h);
@@ -834,6 +837,12 @@ fn field_appearance_fit(doc: &Document, f: &Field, w: &Widget, values: &[String]
     let pad = 2.0 + bw;
     let inner_w = (width - 2.0 * pad).max(1.0);
     let q = wd.get(b"Q").and_then(|o| doc.resolve(o).as_int()).unwrap_or(f.quadding);
+    // A rich text value (`/RV`) for this text is drawn with its own fonts, sizes and colours (#3);
+    // one this can't draw (a script beyond the standard fonts, malformed or stale XHTML) falls
+    // through to the plain value below.
+    if let Some(drawn) = rich_field_appearance(doc, f, &da, &text, &c, Box2 { width, height, bw, pad, q }, place) {
+        return drawn;
+    }
     // The lines to draw (where, and what), drawn once all are known: their Thai shares fonts.
     let mut shown: Vec<(f64, f64, String)> = Vec::new();
     let mut show = |x: f64, y: f64, text: &str| {
@@ -996,6 +1005,272 @@ fn draw_lines(shown: &[(f64, f64, String)], size: f64, font_name: &str, font: Ob
         Piece::Shaped(_) => None,
     });
     (body, fonts, unencodable)
+}
+
+/// A field's own `key`, else its nearest ancestor's (`/RV` and `/DS` are inheritable, §12.7.4.3),
+/// as text: a text string, or a stream's bytes.
+fn inherited_text(doc: &Document, field: pdfcraft_cos::ObjRef, key: &[u8]) -> Option<String> {
+    let mut at = Some(field);
+    let mut seen = std::collections::HashSet::new();
+    while let Some(r) = at {
+        if seen.len() > 64 || !seen.insert(r) {
+            return None;
+        }
+        let d = doc.get(r).as_dict().cloned()?;
+        if let Some(v) = d.get(key) {
+            return match &*doc.resolve(v) {
+                Object::String(s) => Some(s.to_text()),
+                Object::Stream(s) => s.decoded().ok().map(|b| String::from_utf8_lossy(&b).into_owned()),
+                _ => None,
+            };
+        }
+        at = d.reference(b"Parent");
+    }
+    None
+}
+
+/// A `/DA` colour operation (`g`, `rg` or `k`) as RGB; black when it isn't one.
+fn da_rgb(color: &str) -> [f64; 3] {
+    let nums: Vec<f64> = color.split_whitespace().filter_map(|t| t.parse().ok()).filter(|x: &f64| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).collect();
+    match nums.as_slice() {
+        [g] => [*g; 3],
+        [r, g, b] => [*r, *g, *b],
+        [c, m, y, k] => [(1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k)],
+        _ => [0.0; 3],
+    }
+}
+
+/// The rich text value to draw for `text` in a text field set to rich text (§12.7.4.3): its
+/// `/RV` over the style of its `/DA` and `/DS` (the field's, else the form's). `None` for a field
+/// drawn plain: not rich text, a comb or password field, no `/RV` that can be read, or a `/RV`
+/// for some other value.
+fn rich_value(doc: &Document, f: &Field, da: &Da, text: &str) -> Option<RichValue> {
+    if f.kind != FieldKind::Text || !f.has(flags::RICH_TEXT) || f.is_comb() || f.has(flags::PASSWORD) {
+        return None;
+    }
+    let rv = inherited_text(doc, f.obj, b"RV")?;
+    let ds = inherited_text(doc, f.obj, b"DS").or_else(|| acroform(doc)?.get(b"DS").and_then(|o| doc.resolve(o).as_string().map(|s| s.to_text())));
+    // The `/DA` font's own name tells its family and style (a `/DR` font named `/F1` is
+    // `/Helvetica-Bold` underneath).
+    let font_name = acroform(doc)
+        .and_then(|af| {
+            let dr = doc.resolve(af.get(b"DR")?);
+            let fonts = doc.resolve(dr.as_dict()?.get(b"Font")?);
+            let font = doc.resolve(fonts.as_dict()?.get(da.font.as_bytes())?);
+            font.as_dict()?.name(b"BaseFont").map(|b| String::from_utf8_lossy(b).into_owned())
+        })
+        .unwrap_or_else(|| da.font.clone());
+    let base = Style::of_font(&font_name, da.size, da_rgb(&da.color));
+    rich::parse(&rv, ds.as_deref(), base).filter(|r| r.matches(text))
+}
+
+/// A rich text field's appearance (#3), when its `/RV` can be drawn: see [`rich_value`] and
+/// [`rich_appearance`]. `None` draws the plain value.
+fn rich_field_appearance(
+    doc: &Document,
+    f: &Field,
+    da: &Da,
+    text: &str,
+    frame: &str,
+    b: Box2,
+    place: Placement,
+) -> Option<(Stream, Option<char>, Option<Overflow>)> {
+    let rich = rich_value(doc, f, da, text)?;
+    // Text the standard fonts can't hold is drawn plain where plain drawing has a font for it:
+    // Thai (its shaped face) and the form's own composite font (CJK forms). Anywhere else the
+    // plain value would show the same `?` and lose the formatting too, so the rich value is drawn
+    // with `?` for it and the character is reported, as the plain value's would be.
+    let undrawable = text.chars().any(|c| pdfcraft_fonts::first_undrawable(c.encode_utf8(&mut [0; 4])).is_some());
+    if undrawable && (text.chars().any(shaped_text::is_thai) || matches!(dr_font(doc, &da.font), Some((_, FontText::Unicode(_))))) {
+        return None;
+    }
+    let drawn = rich_appearance(&rich, frame, b, f.has(flags::MULTILINE));
+    let mut d = Dict::new();
+    d.set(b"Type".to_vec(), Object::name("XObject"));
+    d.set(b"Subtype".to_vec(), Object::name("Form"));
+    set_form_box(&mut d, place);
+    let mut res = Dict::new();
+    res.set(b"Font".to_vec(), Object::Dict(drawn.fonts));
+    d.set(b"Resources".to_vec(), Object::Dict(res));
+    Some((Stream::flate(d, &drawn.content), drawn.undrawn, drawn.overflow))
+}
+
+/// The box text is drawn in: its size, border width and padding, and its quadding (`/Q`).
+#[derive(Clone, Copy)]
+struct Box2 {
+    width: f64,
+    height: f64,
+    bw: f64,
+    pad: f64,
+    q: i64,
+}
+
+/// A rich value's appearance stream content, the fonts it uses, whether it is cut off, and the
+/// first character drawn as `?` because no standard font holds it.
+struct RichDrawn {
+    content: Vec<u8>,
+    fonts: Dict,
+    overflow: Option<Overflow>,
+    undrawn: Option<char>,
+}
+
+/// One laid-out line: its runs, how wide it is and its tallest size.
+struct RichLine {
+    runs: Vec<(Style, String)>,
+    width: f64,
+    size: f64,
+    align: Option<rich::Align>,
+}
+
+/// Lines of `rich` at `size_of` each style, wrapped to `room` when `wrap` (a multiline field),
+/// else one line, as a single-line field shows paragraphs and line breaks as spaces.
+fn rich_lines(rich: &RichValue, size_of: &dyn Fn(&Style) -> f64, room: f64, wrap: bool) -> Vec<RichLine> {
+    let new_line = |align| RichLine { runs: Vec::new(), width: 0.0, size: 0.0, align };
+    let mut lines = Vec::new();
+    let mut line = new_line(rich.paragraphs.first().and_then(|p| p.align));
+    for (i, p) in rich.paragraphs.iter().enumerate() {
+        if i > 0 {
+            if wrap {
+                lines.push(std::mem::replace(&mut line, new_line(p.align)));
+            } else if let Some(first) = p.spans.first() {
+                line.runs.push((first.style, " ".into()));
+            }
+        }
+        for span in &p.spans {
+            let size = size_of(&span.style);
+            let font = span.style.font();
+            for (j, part) in span.text.split('\n').enumerate() {
+                if j > 0 {
+                    if wrap {
+                        lines.push(std::mem::replace(&mut line, new_line(p.align)));
+                    } else {
+                        line.runs.push((span.style, " ".into()));
+                    }
+                }
+                // Words with the spaces after them, so a line breaks after its spaces.
+                for word in part.split_inclusive(' ') {
+                    let ink = font.text_width(word.trim_end_matches(' '), size);
+                    if wrap && !line.runs.is_empty() && line_ink(&line, size_of) + ink > room + 0.01 {
+                        lines.push(std::mem::replace(&mut line, new_line(p.align)));
+                    }
+                    // A wrapped line doesn't start with the spaces that ended the one before.
+                    if line.runs.is_empty() && word.trim().is_empty() && !lines.is_empty() {
+                        continue;
+                    }
+                    match line.runs.last_mut() {
+                        Some((style, text)) if *style == span.style => text.push_str(word),
+                        _ => line.runs.push((span.style, word.to_string())),
+                    }
+                    line.size = line.size.max(size);
+                }
+            }
+            line.size = line.size.max(size);
+        }
+    }
+    lines.push(line);
+    for l in &mut lines {
+        l.width = line_ink(l, size_of);
+    }
+    lines
+}
+
+/// How wide a line's ink is: its runs, without the spaces it ends in.
+fn line_ink(line: &RichLine, size_of: &dyn Fn(&Style) -> f64) -> f64 {
+    let last = line.runs.len().saturating_sub(1);
+    line.runs
+        .iter()
+        .enumerate()
+        .map(|(i, (style, text))| style.font().text_width(if i == last { text.trim_end_matches(' ') } else { text }, size_of(style)))
+        .sum()
+}
+
+/// Draw `rich` in the box `b` (inside the frame `frame` already drawn), aligned by its `/Q` where
+/// a paragraph doesn't say, on wrapped lines when `multiline`. A character no standard font holds
+/// is drawn and measured as `?`.
+fn rich_appearance(rich: &RichValue, frame: &str, b: Box2, multiline: bool) -> RichDrawn {
+    let runs = || rich.paragraphs.iter().flat_map(|p| &p.spans);
+    let undrawn = runs().find_map(|s| pdfcraft_fonts::first_undrawable(&s.text.replace('\n', " ")));
+    let inner_w = (b.width - 2.0 * b.pad).max(1.0);
+    let inner_h = (b.height - 2.0 * b.pad).max(1.0);
+    // Runs without a size of their own (0, automatic) take one that fits the plain text in the
+    // first run's font, as the plain value would be sized.
+    let auto = if runs().any(|s| s.style.size == 0.0) {
+        let first = runs().next().map(|s| s.style.font()).unwrap_or(pdfcraft_fonts::Std14::Helvetica);
+        auto_text_size(&rich.plain_text(), inner_w, inner_h, multiline, |s, size| first.text_width(s, size))
+    } else {
+        12.0
+    };
+    let size_of = |s: &Style| if s.size > 0.0 { s.size } else { auto };
+    let lines = rich_lines(rich, &size_of, inner_w, multiline);
+    let mut body: Vec<u8> = Vec::new();
+    let mut underlines = String::new();
+    let mut fonts = Dict::new();
+    let mut overflow = None;
+    let mut y = if multiline {
+        b.height - b.pad - 0.85 * lines.first().map_or(auto, |l| l.size)
+    } else {
+        let s = lines.first().map_or(auto, |l| l.size);
+        if 0.925 * s > b.height - 2.0 * b.bw + 0.01 {
+            overflow = Some(Overflow::High { height: 0.925 * s, room: b.height - 2.0 * b.bw, size: s });
+        }
+        (b.height - 0.925 * s) / 2.0 + 0.207 * s
+    };
+    let mut room = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            y -= 1.15 * line.size;
+        }
+        if y - 0.207 * line.size >= b.bw - 0.01 {
+            room += 1;
+        }
+        if overflow.is_none() && line.width > inner_w + 0.01 {
+            overflow = Some(Overflow::Wide { width: line.width, room: inner_w, size: line.size });
+        }
+        let align = line.align.unwrap_or(match b.q {
+            1 => rich::Align::Center,
+            2 => rich::Align::Right,
+            _ => rich::Align::Left,
+        });
+        let mut x = match align {
+            rich::Align::Left => b.pad,
+            rich::Align::Center => b.pad + (inner_w - line.width) / 2.0,
+            rich::Align::Right => b.width - b.pad - line.width,
+        };
+        for (style, text) in &line.runs {
+            let size = size_of(style);
+            let font = style.font();
+            let resource = crate::FieldFont::from_resource(font.base_font()).map_or("Helv", |f| f.resource());
+            if !fonts.contains(resource.as_bytes()) {
+                let mut fd = Dict::new();
+                fd.set(b"Type".to_vec(), Object::name("Font"));
+                fd.set(b"Subtype".to_vec(), Object::name("Type1"));
+                fd.set(b"BaseFont".to_vec(), Object::name(font.base_font()));
+                fd.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+                fonts.set(resource.as_bytes().to_vec(), Object::Dict(fd));
+            }
+            let [r, g, bl] = style.color;
+            let rgb = format!("{} {} {} rg", n(r), n(g), n(bl));
+            body.extend_from_slice(format!("/{resource} {} Tf\n{rgb}\n1 0 0 1 {} {} Tm\n", n(size), n(x), n(y)).as_bytes());
+            // WinAnsi bytes, not UTF-8: the content is assembled as bytes.
+            body.extend(literal(&win_ansi(text)));
+            body.extend_from_slice(b" Tj\n");
+            let w = font.text_width(text, size);
+            if style.underline {
+                let ink = font.text_width(text.trim_end_matches(' '), size);
+                underlines.push_str(&format!("{rgb}\n{} {} {} {} re f\n", n(x), n(y - 0.12 * size), n(ink), n((0.05 * size).max(0.5))));
+            }
+            x += w;
+        }
+    }
+    if multiline && room < lines.len() {
+        overflow = Some(Overflow::Tall { lines: lines.len(), room, size: lines.iter().map(|l| l.size).fold(0.0, f64::max) });
+    }
+    // As for plain text: background and border inside /Tx BMC, so a viewer's redraw keeps them.
+    let mut content =
+        format!("/Tx BMC\nq\n{frame}{} {} {} {} re W n\nBT\n", n(b.bw), n(b.bw), n(b.width - 2.0 * b.bw), n(b.height - 2.0 * b.bw)).into_bytes();
+    content.extend(body);
+    content.extend_from_slice(format!("ET\n{underlines}Q\nEMC\n").as_bytes());
+    RichDrawn { content, fonts, overflow, undrawn }
 }
 
 /// On/Off appearances for a check box or radio button that has none (a check mark or a dot,

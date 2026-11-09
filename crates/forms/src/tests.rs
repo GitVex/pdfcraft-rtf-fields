@@ -760,6 +760,82 @@ fn whitespace_only_text_is_kept_in_a_field_without_a_format() {
     assert!(field(&fields(&reopen(&doc)), "name").value.is_empty());
 }
 
+/// A rich text value (`/RV`, §12.7.4.3) another app wrote, with its default style (`/DS`).
+const RICH: &str = "<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\"><p><b>Ada</b></p></body>";
+
+fn has_rich_value(doc: &Document, obj: ObjRef) -> (bool, bool) {
+    let d = doc.get(obj).as_dict().cloned().unwrap();
+    (d.get(b"RV").is_some(), d.get(b"DS").is_some())
+}
+
+fn make_rich(doc: &mut Document, obj: ObjRef) {
+    doc.update_dict(obj, |d| {
+        d.set(b"Ff".to_vec(), Object::Int(i64::from(flags::RICH_TEXT)));
+        d.set(b"RV".to_vec(), Object::String(PdfString::text(RICH)));
+        d.set(b"DS".to_vec(), Object::String(PdfString::text("font: Helvetica 12pt")));
+    })
+    .unwrap();
+}
+
+/// Issue #2: setting a text field to the value it already has keeps its formatting (`/RV`), which
+/// another app wrote and PdfCraft can't yet rewrite; a new value still drops it, so `/RV` never
+/// contradicts `/V`. `/DS` is the default style and stays either way.
+#[test]
+fn an_unchanged_value_keeps_the_rich_text_and_a_new_one_drops_it() {
+    let name = ObjRef::new(10, 0);
+    let mut doc = fixture();
+    make_rich(&mut doc, name);
+    set_value(&mut doc, "name", &FieldValue::Text("Ada".into())).unwrap();
+    let doc = reopen(&doc);
+    assert_eq!(has_rich_value(&doc, name), (true, true), "the same value keeps /RV and /DS");
+    assert_eq!(doc.get(name).as_dict().unwrap().get(b"RV").and_then(|v| v.as_string()).map(PdfString::to_text).as_deref(), Some(RICH));
+    let mut doc = doc;
+    set_value(&mut doc, "name", &FieldValue::Text("Grace".into())).unwrap();
+    let doc = reopen(&doc);
+    assert_eq!(has_rich_value(&doc, name), (false, true), "a new value drops /RV, which would contradict /V");
+    assert_eq!(field(&fields(&doc), "name").value, ["Grace"]);
+}
+
+/// Issue #2: a multiline value given back with other line breaks (`\n` for the `\r` Acrobat
+/// writes) is the same value, and keeps its rich text; other text still drops it.
+#[test]
+fn an_unchanged_value_with_other_line_breaks_keeps_the_rich_text() {
+    let notes = ObjRef::new(11, 0);
+    let mut doc = fixture();
+    doc.update_dict(notes, |d| d.set(b"V".to_vec(), Object::String(PdfString::text("one\r\ntwo\rthree")))).unwrap();
+    make_rich(&mut doc, notes);
+    set_value(&mut doc, "notes", &FieldValue::Text("one\ntwo\nthree".into())).unwrap();
+    let mut doc = reopen(&doc);
+    assert!(has_rich_value(&doc, notes).0, "only the line breaks are written differently");
+    set_value(&mut doc, "notes", &FieldValue::Text("one\ntwo\nfour".into())).unwrap();
+    assert!(!has_rich_value(&reopen(&doc), notes).0, "different text drops it");
+}
+
+/// Issue #2, for fields that repeat a name (§12.7.3.1): each one keeps its own `/RV` while the
+/// name's value is unchanged, and loses it when the value changes.
+#[test]
+fn fields_sharing_a_name_keep_their_rich_text_while_the_value_is_unchanged() {
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".into(),                 // 1
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>".into(), // 2
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R 6 0 R] >>".into(),             // 3
+        "<< /Fields [5 0 R 6 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 7 0 R >> >> >>".into(), // 4
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Client) /V (Ada) /Rect [50 700 250 720] /P 3 0 R >>".into(), // 5
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Client) /V (Ada) /Rect [50 600 250 620] /P 3 0 R >>".into(), // 6
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".into(), // 7
+    ];
+    let (first, twin) = (ObjRef::new(5, 0), ObjRef::new(6, 0));
+    let mut doc = document(&objs);
+    make_rich(&mut doc, first);
+    make_rich(&mut doc, twin);
+    set_value(&mut doc, "Client", &FieldValue::Text("Ada".into())).unwrap();
+    let mut doc = reopen(&doc);
+    assert_eq!((has_rich_value(&doc, first).0, has_rich_value(&doc, twin).0), (true, true), "the same value keeps both");
+    set_value(&mut doc, "Client", &FieldValue::Text("Grace".into())).unwrap();
+    let doc = reopen(&doc);
+    assert_eq!((has_rich_value(&doc, first).0, has_rich_value(&doc, twin).0), (false, false), "a new value drops both");
+}
+
 #[test]
 fn text_fields_get_new_appearances() {
     let mut doc = fixture();
@@ -2203,6 +2279,209 @@ fn appearance_properties_restyle_every_widget() {
         .unwrap();
     let a = ap(&doc, &field(&fields(&doc), "name").widgets[0]);
     assert!(!a.contains(" re S") && a.contains(" l S"), "underline only: {a}");
+}
+
+fn dr_base_font(doc: &Document, resource: &str) -> Option<String> {
+    let root = doc.root().unwrap();
+    let af = doc.resolve(doc.get(root).as_dict().unwrap().get(b"AcroForm").unwrap());
+    let dr = doc.resolve(af.as_dict().unwrap().get(b"DR").unwrap());
+    let fonts = doc.resolve(dr.as_dict().unwrap().get(b"Font").unwrap());
+    let font = doc.resolve(fonts.as_dict().unwrap().get(resource.as_bytes())?);
+    font.as_dict().unwrap().name(b"BaseFont").map(|b| String::from_utf8_lossy(b).into_owned())
+}
+
+/// Issue #1: every standard 14 Latin font, bold and italic included, can be a field's font. It is
+/// written to `/DA` under Acrobat's resource name, added to `/DR`, drawn in the appearance and
+/// read back as itself.
+#[test]
+fn every_standard_font_round_trips_as_a_field_font() {
+    for font in FieldFont::ALL {
+        let mut doc = one_page();
+        add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("name")).unwrap();
+        set_value(&mut doc, "name", &FieldValue::Text("Ada".into())).unwrap();
+        let f = field(&fields(&doc), "name").clone();
+        let new = Look { font, ..look(&doc, &f) };
+        set_props(&mut doc, "name", &FieldProps { look: Some(new), font_size: Some(12.0), ..FieldProps::default() }).unwrap();
+        let doc = reopen(&doc);
+        let f = field(&fields(&doc), "name").clone();
+        assert_eq!(look(&doc, &f).font, font, "{font:?} reads back as itself");
+        assert_eq!(dr_base_font(&doc, font.resource()).as_deref(), Some(font.base_font()), "{font:?} is in /DR");
+        let a = ap(&doc, &f.widgets[0]);
+        assert!(a.contains(&format!("/{} 12 Tf", font.resource())) && a.contains("(Ada) Tj"), "{font:?}: {a}");
+    }
+    // Choosing a font through an appearance patch (bulk edits, `form_set_props`) adds it too.
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("name")).unwrap();
+    let patch = LookPatch { font: Some(FieldFont::CourierBoldOblique), ..LookPatch::default() };
+    set_props(&mut doc, "name", &FieldProps { appearance: Some(patch), ..FieldProps::default() }).unwrap();
+    let doc = reopen(&doc);
+    assert_eq!(look(&doc, field(&fields(&doc), "name")).font, FieldFont::CourierBoldOblique);
+    assert_eq!(dr_base_font(&doc, "CoBO").as_deref(), Some("Courier-BoldOblique"));
+}
+
+/// Issue #1: a bold field is measured with the bold font's widths, so text set to auto-size
+/// shrinks further to fit than in the regular face (an `m` is 833 units wide in Helvetica, 889 in
+/// Helvetica-Bold).
+#[test]
+fn auto_sized_text_is_measured_in_the_bold_font() {
+    let size_in = |font: FieldFont| {
+        let mut doc = one_page();
+        add_field(&mut doc, 0, [50.0, 700.0, 150.0, 760.0], &NewField::Text { multiline: false }, Some("name")).unwrap();
+        let f = field(&fields(&doc), "name").clone();
+        let new = Look { font, ..look(&doc, &f) };
+        set_props(&mut doc, "name", &FieldProps { look: Some(new), font_size: Some(0.0), ..FieldProps::default() }).unwrap();
+        set_value(&mut doc, "name", &FieldValue::Text("mmmmmmmmmmmmmmmmmmmm".into())).unwrap();
+        let a = ap(&doc, &field(&fields(&doc), "name").widgets[0]);
+        let toks: Vec<&str> = a.split_whitespace().collect();
+        let at = toks.iter().position(|t| *t == "Tf").unwrap_or_else(|| panic!("no Tf in {a}"));
+        toks[at - 1].parse::<f64>().unwrap()
+    };
+    let (regular, bold) = (size_in(FieldFont::Helvetica), size_in(FieldFont::HelveticaBold));
+    assert!(bold < regular, "bold is wider, so it auto-sizes smaller: {bold} vs {regular}");
+}
+
+/// A text field `rich` (multiline or not) with `value` in `/V`, the rich text flag and `/RV`
+/// `rv`, redrawn: its appearance's content bytes and the font resources it uses.
+fn rich_field(rv: &str, value: &str, multiline: bool) -> (Vec<u8>, Vec<String>) {
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 600.0, 250.0, 680.0], &NewField::Text { multiline }, Some("rich")).unwrap();
+    let f = field(&fields(&doc), "rich").clone();
+    let ff = flags::RICH_TEXT | if multiline { flags::MULTILINE } else { 0 };
+    doc.update_dict(f.obj, |d| {
+        d.set(b"Ff".to_vec(), Object::Int(i64::from(ff)));
+        d.set(b"DA".to_vec(), PdfString::literal(b"/Helv 12 Tf 0 g".to_vec()));
+        d.set(b"V".to_vec(), Object::String(PdfString::text(value)));
+        d.set(b"RV".to_vec(), Object::String(PdfString::text(rv)));
+    })
+    .unwrap();
+    redraw_field(&mut doc, "rich").unwrap();
+    let w = field(&fields(&doc), "rich").widgets[0].obj;
+    let n = doc.get(w).as_dict().unwrap().get(b"AP").unwrap().as_dict().unwrap().reference(b"N").unwrap();
+    let Object::Stream(s) = &*doc.get(n) else { panic!() };
+    let res = s.dict.get(b"Resources").and_then(Object::as_dict).and_then(|r| r.get(b"Font")).and_then(Object::as_dict).cloned().unwrap_or_default();
+    let mut fonts: Vec<String> = res.iter().map(|(k, _)| String::from_utf8_lossy(k).into_owned()).collect();
+    fonts.sort();
+    (s.decoded().unwrap(), fonts)
+}
+
+const XHTML: &str = "<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:xfa=\"http://www.xfa.org/schema/xfa-data/1.0/\" xfa:APIVersion=\"Acroform:2.7.0.0\" xfa:spec=\"2.1\">";
+
+/// Issue #3: bold and italic runs are drawn in the bold and italic standard fonts, each placed
+/// after the one before at its own width, inside `/Tx BMC`.
+#[test]
+fn a_rich_value_draws_its_bold_and_italic_runs() {
+    let rv = format!("{XHTML}<p dir=\"ltr\">Plain <b>bold</b> <i>italic</i></p></body>");
+    let (ap, fonts) = rich_field(&rv, "Plain bold italic", false);
+    let ap = String::from_utf8_lossy(&ap);
+    assert_eq!(fonts, ["HeBo", "HeOb", "Helv"], "{ap}");
+    let at = |s: &str| ap.find(s).unwrap_or_else(|| panic!("{s} in {ap}"));
+    assert!(at("/Helv 12 Tf") < at("(Plain ) Tj") && at("(Plain ) Tj") < at("/HeBo 12 Tf") && at("(bold) Tj") < at("/HeOb 12 Tf"), "{ap}");
+    assert!(ap.contains("/Tx BMC") && ap.trim_end().ends_with("EMC"), "{ap}");
+    // "Plain " in Helvetica is 2501 units wide, 30.012 at 12 pt, so "bold" starts at 3 + 30.012.
+    assert!(ap.contains("1 0 0 1 33.012 "), "bold starts after the plain run: {ap}");
+}
+
+/// Issue #3: a size change and a colour change mid-line, and an underlined run.
+#[test]
+fn a_rich_value_changes_size_and_colour_mid_line() {
+    let rv = format!(
+        "{XHTML}<p>small <span style=\"font-size:18pt;color:#ff0000\">BIG</span> <span style=\"text-decoration:underline\">under</span></p></body>"
+    );
+    let (ap, _) = rich_field(&rv, "small BIG under", false);
+    let ap = String::from_utf8_lossy(&ap);
+    assert!(ap.contains("/Helv 18 Tf\n1 0 0 rg") && ap.contains("(BIG) Tj"), "{ap}");
+    assert!(ap.contains("/Helv 12 Tf\n0 0 0 rg") && ap.contains("(small ) Tj"), "{ap}");
+    assert!(ap.matches(" re f\n").count() >= 1 && ap.find("(under) Tj") < ap.rfind(" re f"), "an underline after the text: {ap}");
+}
+
+/// Issue #3: a multiline rich value wraps across runs and keeps each paragraph's alignment.
+#[test]
+fn a_multiline_rich_value_wraps_across_runs_and_aligns_paragraphs() {
+    let rv = format!(
+        "{XHTML}<p>A long first paragraph that <b>has to wrap over</b> several lines of the box</p><p style=\"text-align:right\">right</p></body>"
+    );
+    let (ap, _) = rich_field(&rv, "A long first paragraph that has to wrap over several lines of the box\rright", true);
+    let ap = String::from_utf8_lossy(&ap);
+    let rows: Vec<f64> = ap.lines().filter_map(|l| l.strip_suffix(" Tm")).filter_map(|l| l.split(' ').nth(5)?.parse().ok()).collect();
+    let mut distinct = rows.clone();
+    distinct.dedup();
+    assert!(distinct.len() >= 3, "wrapped onto several lines: {ap}");
+    // "right" in Helvetica is 1945 units wide, 23.34 at 12 pt: it ends at the right padding (200 - 3).
+    assert!(ap.contains("1 0 0 1 173.66 "), "right aligned: {ap}");
+}
+
+/// Issue #3: text outside ASCII is written in WinAnsi bytes, as the plain value is.
+#[test]
+fn a_rich_value_writes_winansi_bytes() {
+    let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Zürich</b></p></body>"), "Zürich", false);
+    assert_eq!(fonts, ["HeBo"], "drawn as rich text");
+    assert!(ap.windows(8).any(|x| x == b"(Z\xfcrich)"), "{}", String::from_utf8_lossy(&ap));
+}
+
+/// Issue #3: a `/RV` that can't be read as the rich form of the value draws the plain value,
+/// exactly as a field without one: malformed XHTML, and a `/RV` for another value.
+#[test]
+fn a_rich_value_that_cannot_be_read_falls_back_to_the_plain_value() {
+    let plain = |value: &str| rich_field("", value, false).0;
+    for (rv, value, why) in [
+        (format!("{XHTML}<p><b>Ada</p></body>"), "Ada", "malformed"),
+        (format!("{XHTML}<p><b>Grace</b></p></body>"), "Ada", "stale: /V changed after /RV was written"),
+    ] {
+        assert_eq!(rich_field(&rv, value, false).0, plain(value), "{why}");
+    }
+    let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Ada</b></p></body>"), "Ada", false);
+    assert_ne!(ap, plain("Ada"), "a readable /RV is drawn rich");
+    assert_eq!(fonts, ["HeBo"]);
+}
+
+/// Issue #3: a character no standard font holds (a ballot box in a character sheet's notes) is
+/// drawn as `?` in the rich value and reported, as the plain value's would be, rather than losing
+/// the formatting of the rest; Thai, which plain drawing has a face for, is drawn plain.
+#[test]
+fn a_rich_value_draws_characters_without_a_standard_glyph_as_reported_question_marks() {
+    let (ap, fonts) = rich_field(&format!("{XHTML}<p><b>Tools</b> \u{2610} Thieves</p></body>"), "Tools \u{2610} Thieves", false);
+    assert_eq!(fonts, ["HeBo", "Helv"], "still drawn rich");
+    assert!(
+        String::from_utf8_lossy(&ap).contains("(Tools) Tj") && String::from_utf8_lossy(&ap).contains("( ? Thieves) Tj"),
+        "{}",
+        String::from_utf8_lossy(&ap)
+    );
+    // The character is reported, for the caller to mark the widget and warn.
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 600.0, 250.0, 680.0], &NewField::Text { multiline: false }, Some("rich")).unwrap();
+    let obj = field(&fields(&doc), "rich").obj;
+    doc.update_dict(obj, |d| {
+        d.set(b"Ff".to_vec(), Object::Int(i64::from(flags::RICH_TEXT)));
+        d.set(b"RV".to_vec(), Object::String(PdfString::text(&format!("{XHTML}<p><b>Tools</b> \u{2610}</p></body>"))));
+    })
+    .unwrap();
+    let f = field(&fields(&doc), "rich").clone();
+    let (_, undrawn) = crate::appearance::field_appearance_drawn(&doc, &f, &f.widgets[0], &["Tools \u{2610}".to_string()], false);
+    assert_eq!(undrawn, Some('\u{2610}'));
+    let (_, fonts) = rich_field(
+        &format!("{XHTML}<p><b>\u{0e2a}\u{0e27}\u{0e31}\u{0e2a}\u{0e14}\u{0e35}</b></p></body>"),
+        "\u{0e2a}\u{0e27}\u{0e31}\u{0e2a}\u{0e14}\u{0e35}",
+        false,
+    );
+    assert!(!fonts.contains(&"HeBo".to_string()), "Thai is drawn plain: {fonts:?}");
+}
+
+/// Issue #1: a `/DA` that already names a bold or italic standard font, by resource or base font
+/// name, reads back as that font rather than as Helvetica; any other font still reads as Helvetica.
+#[test]
+fn a_bold_or_italic_da_reads_back_as_its_font() {
+    for (da, font) in [
+        ("/TiBI 12 Tf 0 g", FieldFont::TimesBoldItalic),
+        ("/HeBo 0 Tf 0 g", FieldFont::HelveticaBold),
+        ("/Courier-Oblique 9 Tf 0 g", FieldFont::CourierOblique),
+        ("/MyFont 9 Tf 0 g", FieldFont::Helvetica),
+    ] {
+        let mut doc = one_page();
+        add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("name")).unwrap();
+        let obj = field(&fields(&doc), "name").obj;
+        doc.update_dict(obj, |d| d.set(b"DA".to_vec(), PdfString::literal(da.as_bytes().to_vec()))).unwrap();
+        assert_eq!(look(&doc, field(&fields(&doc), "name")).font, font, "{da}");
+    }
 }
 
 #[test]

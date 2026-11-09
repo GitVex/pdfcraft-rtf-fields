@@ -13,6 +13,7 @@ pdfcraft-cos = { workspace = true }
 pdfcraft-fonts = { workspace = true }
 pdfcraft-content = { workspace = true }
 pdfcraft-model = { workspace = true }
+roxmltree = "0.21"
 thiserror = { workspace = true }
 
 [dev-dependencies]

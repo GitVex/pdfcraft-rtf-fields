@@ -42,7 +42,7 @@ fn format_arg(v: &Value) -> Result<Format> {
 }
 
 /// `{"border": "#FF0000" | "none", "fill": …, "width": 1-3, "style": "solid"|…, "text_color": …,
-/// "font": "helvetica"|"times"|"courier"}`, changing only what is given.
+/// "font": "helvetica"|"times-bold"|…}` (`FieldFont::key`), changing only what is given.
 fn look_arg(v: &Value) -> Result<pdfcraft_engine::FieldLookPatch> {
     use pdfcraft_engine::{BorderStyle, FieldFont, FieldLookPatch};
     let o = v.as_object().ok_or_else(|| bad("appearance must be an object"))?;
@@ -84,11 +84,11 @@ fn look_arg(v: &Value) -> Result<pdfcraft_engine::FieldLookPatch> {
             })
             .transpose()?,
         font: string("font")?
-            .map(|s| match s {
-                "helvetica" => Ok(FieldFont::Helvetica),
-                "times" => Ok(FieldFont::Times),
-                "courier" => Ok(FieldFont::Courier),
-                x => Err(bad(format!("unknown font {x:?} (helvetica, times, courier)"))),
+            .map(|s| {
+                FieldFont::ALL.into_iter().find(|f| f.key() == s).ok_or_else(|| {
+                    let known: Vec<&str> = FieldFont::ALL.iter().map(|f| f.key()).collect();
+                    bad(format!("unknown font {s:?} ({})", known.join(", ")))
+                })
             })
             .transpose()?,
     })

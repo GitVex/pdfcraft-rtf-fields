@@ -8,9 +8,12 @@
 //!   the states their appearances already define.
 //! - [`reset`]: Acrobat's Clear form (back to `/DV`).
 //! - [`table`]: a table of text fields, laid out and named before any of it is added.
+//! - [`rich`]: rich text values (`/RV`), drawn in a rich text field's appearance. `/RV` is kept
+//!   while its field's value is unchanged, and removed when a new value is set so it can't
+//!   contradict `/V`.
 //!
-//! Not yet: JavaScript actions (format, keystroke, validate, calculate — M6.4/M6.5) and rich text
-//! values (`/RV`, which is removed when a value is set so it can't contradict `/V`).
+//! Not yet: JavaScript actions (format, keystroke, validate, calculate — M6.4/M6.5), and writing or
+//! editing rich text values.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -37,6 +40,7 @@ pub use scripting::{
 
 mod appearances;
 mod read;
+pub mod rich;
 mod tab_order;
 mod values;
 
