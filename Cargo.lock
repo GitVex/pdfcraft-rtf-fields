@@ -4521,6 +4521,7 @@ dependencies = [
  "pdfcraft-fonts",
  "pdfcraft-model",
  "proptest",
+ "roxmltree 0.21.2",
  "thiserror 2.0.21",
 ]
 
