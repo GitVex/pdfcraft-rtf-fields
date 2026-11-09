@@ -319,15 +319,23 @@ fn rich_for(f: &FormField, v: &Value) -> Result<FieldValue> {
             None => base.color,
             Some(c) => crate::comments::parse_color(c.as_str().ok_or_else(|| wrong(format!("run {n}: color must be a string")))?)?,
         };
-        let family = match o.get("font").map(|v| v.as_str()) {
-            None => base.family,
-            Some(Some("helvetica")) => Family::Helvetica,
-            Some(Some("times")) => Family::Times,
-            Some(Some("courier")) => Family::Courier,
+        // A run without a font keeps the field's own (its form font, when it has one).
+        let (family, face) = match o.get("font").map(|v| v.as_str()) {
+            None => (base.family, base.face),
+            Some(Some("helvetica")) => (Family::Helvetica, None),
+            Some(Some("times")) => (Family::Times, None),
+            Some(Some("courier")) => (Family::Courier, None),
             Some(_) => return Err(wrong(format!("run {n}: font must be helvetica, times or courier"))),
         };
-        let style =
-            Style { family, bold: flag("bold", base.bold)?, italic: flag("italic", base.italic)?, size, color, underline: flag("underline", false)? };
+        let style = Style {
+            family,
+            face,
+            bold: flag("bold", base.bold)?,
+            italic: flag("italic", base.italic)?,
+            size,
+            color,
+            underline: flag("underline", false)?,
+        };
         for (j, part) in text.split('\n').enumerate() {
             if j > 0 {
                 paragraphs.push(Paragraph { align: None, spans: Vec::new() });
