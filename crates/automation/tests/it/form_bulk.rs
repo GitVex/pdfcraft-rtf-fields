@@ -174,3 +174,21 @@ fn button_export_edit_is_one_undo_step_and_survives_save() {
     assert_eq!(check["value"], true);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Issue #1: `form_set_props` takes every standard font by name, bold and italic included; the
+/// choice survives a save and reopen, and an unknown name is refused with the names it takes.
+#[test]
+fn bold_and_italic_field_fonts_through_form_set_props() {
+    let (mut a, id, dir) = setup("bold-italic");
+    for font in FieldFont::ALL {
+        call(&mut a, json!({"doc": id, "field": "alpha", "appearance": {"font": font.key()}}));
+        assert_eq!(a.session().get(DocId(id)).unwrap().field_look("alpha").unwrap().font, font, "{}", font.key());
+    }
+    call(&mut a, json!({"doc": id, "field": "alpha", "appearance": {"font": "times-bold-italic"}}));
+    let mut s = Session::new();
+    let reopened = s.open("saved.pdf", None, bytes(&a, id), None).unwrap();
+    assert_eq!(s.get(reopened).unwrap().field_look("alpha").unwrap().font, FieldFont::TimesBoldItalic);
+    let err = a.call("form_set_props", &json!({"doc": id, "field": "alpha", "appearance": {"font": "comic"}})).unwrap_err();
+    assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("times-bold-italic")), "{err:?}");
+    std::fs::remove_dir_all(dir).ok();
+}

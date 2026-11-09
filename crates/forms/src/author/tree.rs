@@ -1,4 +1,4 @@
-use super::{Dict, Document, Field, FormError, ObjRef, Object, PdfString, invalid};
+use super::{Dict, Document, Field, FieldFont, FormError, ObjRef, Object, PdfString, invalid};
 
 /// The AcroForm dictionary's reference, creating the form (with `/Helv` in `/DR`) if needed.
 pub(crate) fn ensure_form(doc: &mut Document) -> Result<ObjRef, FormError> {
@@ -23,24 +23,43 @@ pub(crate) fn ensure_form(doc: &mut Document) -> Result<ObjRef, FormError> {
     let (dr, mut fonts) = form_fonts(doc, &af);
     let mut added = inline_fonts_as_objects(doc, &mut fonts);
     // Acrobat's resource names for the standard fonts its Appearance tab offers.
-    for (name, base) in [("Helv", "Helvetica"), ("TiRo", "Times-Roman"), ("Cour", "Courier")] {
-        if fonts.contains(name.as_bytes()) {
-            continue;
-        }
-        let mut f = Dict::new();
-        f.set(b"Type".to_vec(), Object::name("Font"));
-        f.set(b"Subtype".to_vec(), Object::name("Type1"));
-        f.set(b"BaseFont".to_vec(), Object::name(base));
-        f.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
-        let r = doc.add(Object::Dict(f));
-        fonts.set(name.as_bytes().to_vec(), Object::Ref(r));
-        added = true;
+    for font in [FieldFont::Helvetica, FieldFont::Times, FieldFont::Courier] {
+        added |= add_standard_font(doc, &mut fonts, font);
     }
     if added {
         store_form_fonts(doc, &mut af, dr, fonts);
     }
     doc.set(r, Object::Dict(af));
     Ok(r)
+}
+
+/// [`ensure_form`], with `font` in `/DR` too: the bold and italic standard fonts are added when a
+/// field is given one, not to every form.
+pub(crate) fn ensure_form_font(doc: &mut Document, font: FieldFont) -> Result<ObjRef, FormError> {
+    let r = ensure_form(doc)?;
+    let mut af = doc.get(r).as_dict().cloned().unwrap_or_default();
+    let (dr, mut fonts) = form_fonts(doc, &af);
+    if add_standard_font(doc, &mut fonts, font) {
+        store_form_fonts(doc, &mut af, dr, fonts);
+        doc.set(r, Object::Dict(af));
+    }
+    Ok(r)
+}
+
+/// Add `font` to a `/DR` font dictionary under its resource name, unless that name is taken.
+/// Whether it was added.
+fn add_standard_font(doc: &mut Document, fonts: &mut Dict, font: FieldFont) -> bool {
+    if fonts.contains(font.resource().as_bytes()) {
+        return false;
+    }
+    let mut f = Dict::new();
+    f.set(b"Type".to_vec(), Object::name("Font"));
+    f.set(b"Subtype".to_vec(), Object::name("Type1"));
+    f.set(b"BaseFont".to_vec(), Object::name(font.base_font()));
+    f.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+    let r = doc.add(Object::Dict(f));
+    fonts.set(font.resource().as_bytes().to_vec(), Object::Ref(r));
+    true
 }
 
 /// The form dictionary's `/DR` and its `/Font` dictionary, resolved (empty where missing).

@@ -1,6 +1,8 @@
 use super::join::{check_join, join_radio_group};
 use super::look::{BorderStyle, da_string, patch_da, patch_widget_look, redraw_widgets};
-use super::tree::{ancestor_sets, attach, check_place, child_named, clash, detach, ensure_form, inherited, name_parts, own_inherited};
+use super::tree::{
+    ancestor_sets, attach, check_place, child_named, clash, detach, ensure_form, ensure_form_font, inherited, name_parts, own_inherited,
+};
 use super::{Dict, Document, Field, FieldKind, FieldProps, FormError, MIN_FIELD_SIDE, ObjRef, Object, PdfString, fields, flags, invalid};
 
 /// Swap width and height, keeping the center. `None` when that is not a usable widget.
@@ -187,8 +189,9 @@ pub fn set_props(doc: &mut Document, name: &str, props: &FieldProps) -> Result<S
         Some(l) => da_string(l.font, size, l.text),
         None => patch_da(&f.da, props.font_size, &props.appearance.unwrap_or_default()),
     };
-    if props.look.is_some() || props.appearance.is_some_and(|p| p.font.is_some()) {
-        ensure_form(doc)?;
+    // The chosen font goes into /DR, so the appearance is drawn and measured with it.
+    if let Some(font) = props.look.as_ref().map(|l| l.font).or_else(|| props.appearance.and_then(|p| p.font)) {
+        ensure_form_font(doc, font)?;
     }
     let mut ff = f.flags;
     let mut set_flag = |flag: u32, on: Option<bool>| {
