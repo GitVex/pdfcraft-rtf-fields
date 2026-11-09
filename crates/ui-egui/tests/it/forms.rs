@@ -2584,3 +2584,70 @@ fn bold_from_the_format_panel_formats_a_rich_fields_selection() {
     h.run_steps(3);
     assert_eq!(bold_runs(&h), ["Sneak"]);
 }
+
+/// How many top-level bookmarks the document has.
+fn bookmark_count(h: &Harness<'static, PdfCraftApp>) -> usize {
+    let s = h.state();
+    s.session.get(s.views[0].id).unwrap().info.outline.len()
+}
+
+/// Issue #8: in a rich text field ⌘B, ⌘I and ⌘U format the selection, and New bookmark (⌘B)
+/// doesn't fire while a field has the keys.
+#[test]
+fn command_b_i_u_format_a_rich_fields_selection_and_add_no_bookmark() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    let bookmarks = bookmark_count(&h);
+    click_field(&mut h, "notes", 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    for key in [egui::Key::B, egui::Key::I, egui::Key::U] {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, key);
+        h.run_steps(2);
+    }
+    assert!(h.state().views[0].forms.focus.is_some(), "still typing");
+    h.key_press(egui::Key::Tab);
+    h.run_steps(4);
+    let s = h.state();
+    let rich = s.session.get(s.views[0].id).unwrap().field_rich_value("notes").unwrap();
+    let runs: Vec<(String, bool, bool, bool)> =
+        rich.paragraphs.iter().flat_map(|p| &p.spans).map(|r| (r.text.clone(), r.style.bold, r.style.italic, r.style.underline)).collect();
+    // "Sneak" was bold and " Attack" wasn't: ⌘B on the mixed selection makes it all bold.
+    assert_eq!(runs, [("Sneak Attack".to_string(), true, true, true)]);
+    assert_eq!(bookmark_count(&h), bookmarks, "⌘B in the field added no bookmark");
+}
+
+/// Issue #8: ⌘B in a plain text field does nothing, neither formatting nor a bookmark; on the
+/// page, it still adds one.
+#[test]
+fn command_b_in_a_plain_field_adds_no_bookmark_but_does_on_the_page() {
+    let mut h = harness();
+    let bookmarks = bookmark_count(&h);
+    click_field(&mut h, "name", 0);
+    h.event(egui::Event::Text("Ada".into()));
+    h.run_steps(1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::B);
+    h.run_steps(3);
+    assert_eq!(bookmark_count(&h), bookmarks, "no bookmark while typing");
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.text.as_str()), Some("Ada"), "the field is untouched");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.state().views[0].forms.focus.is_none());
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::B);
+    h.run_steps(3);
+    assert!(bookmark_count(&h) > bookmarks || h.query_all_by_value("Untitled").next().is_some(), "on the page, ⌘B adds a bookmark");
+}
+
+/// Issue #8: ⌘E in a rich text field opens the left panel, which shows Format text for it.
+#[test]
+fn command_e_in_a_rich_field_shows_format_text() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    h.state_mut().set_option("left", "closed").unwrap();
+    h.run_steps(3);
+    click_field(&mut h, "notes", 0);
+    assert!(h.query_by_label("Bold").is_none(), "the panel is closed");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::E);
+    h.run_steps(4);
+    assert!(h.state().left_open, "⌘E opened the left panel");
+    assert!(h.query_by_label("Bold").is_some(), "with Format text for the field");
+    assert!(h.state().views[0].forms.focus.is_some(), "the field is still being edited");
+}

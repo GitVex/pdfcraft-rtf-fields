@@ -3802,6 +3802,10 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
             crate::forms_ui::FormNotice::NoAction(name) => app.notify_fmt("{name} has no action", &[("name", &name)]),
         }
     }
+    // ⌘E in a rich text field: the left panel shows Format text for it (#8).
+    if std::mem::take(&mut app.views[index].forms.format_panel) {
+        app.left_open = true;
+    }
     if let Some((name, action)) = app.views[index].forms.button.take() {
         run_button(app, index, &name, action);
     }

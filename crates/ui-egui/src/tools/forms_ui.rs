@@ -96,6 +96,9 @@ pub struct FormView {
     pub unbaked: HashSet<(String, usize)>,
     /// A message for the app to show (e.g. "buttons run JavaScript").
     pub notice: Option<FormNotice>,
+    /// ⌘E in a rich text field asked for the Format text panel (#8): the app opens the left panel,
+    /// which shows it while the field is edited.
+    pub(crate) format_panel: bool,
     /// A push button was clicked: (its field name, what it does).
     pub button: Option<(String, pdfcraft_engine::form_scripts::ButtonAction)>,
     /// The focused check box or radio button was clicked. It toggles once no other edit is
@@ -1242,6 +1245,7 @@ pub(crate) fn overlay(
             // Over the page, so only where the document shows: a field scrolled under the mode bar
             // or a side panel must leave them their pointer (#2755). It stays on its field, cut off
             // as the page is, rather than pushed back into the window.
+            let mut want_format = false;
             egui::Area::new(egui::Id::unique(("form-editor", view.view_key())))
                 .fade_in(false)
                 .order(egui::Order::Foreground)
@@ -1306,6 +1310,19 @@ pub(crate) fn overlay(
                             let sorted = range.as_sorted_char_range();
                             fx.selection = sorted.start.into()..sorted.end.into();
                         }
+                        // ⌘B / ⌘I / ⌘U (Ctrl elsewhere) format the selection, or what is typed next,
+                        // and ⌘E asks for the Format text panel (#8). Taken here, so the app's own
+                        // shortcuts (New bookmark is ⌘B) don't see them while the field has the keys.
+                        if r.has_focus() {
+                            use super::rich_field::Toggle;
+                            let cmd = |key| ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
+                            for (key, what) in [(egui::Key::B, Toggle::Bold), (egui::Key::I, Toggle::Italic), (egui::Key::U, Toggle::Underline)] {
+                                if cmd(key) {
+                                    draft.toggle(&fx.selection, what);
+                                }
+                            }
+                            want_format |= cmd(egui::Key::E);
+                        }
                     }
                     // The form field's own logical name; not a visual/preordered label.
                     let r = r.accessible_name(f.name.clone());
@@ -1336,6 +1353,9 @@ pub(crate) fn overlay(
                         }
                     }
                 });
+            if want_format {
+                view.forms.format_panel = true;
+            }
             // Date fields: a calendar under the field (Acrobat's date picker).
             if let pdfcraft_engine::form_scripts::Format::Date(fmt) = &f.actions.format
                 && let Some(picked) = calendar(ctx, view, rect, fmt, today)
