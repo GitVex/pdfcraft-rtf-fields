@@ -271,6 +271,78 @@ fn value_for(f: &FormField, v: &Value) -> Result<FieldValue> {
     })
 }
 
+/// The most runs and characters one field's formatted text may have: form text, bounded so an
+/// argument can't build an unbounded `/RV`.
+const MAX_RUNS: usize = 2_000;
+const MAX_RICH_CHARS: usize = 100_000;
+
+/// A `rich` entry → formatted text for a text field: runs `{text, bold, italic, underline, size,
+/// color, font}`, a `\n` in text starting a new paragraph. What a run doesn't set comes from the
+/// field's `/DA` (font, size, colour).
+fn rich_for(f: &FormField, v: &Value) -> Result<FieldValue> {
+    use pdfcraft_engine::form_rich::{Family, Paragraph, RichValue, Span, Style};
+    let wrong = |what: String| ToolError::InvalidArgs(format!("{}: {what}", f.name));
+    if f.kind != FormFieldKind::Text {
+        return Err(wrong(format!("formatted text is only for text fields, and this is a {}", kind_name(f.kind))));
+    }
+    let runs = v.as_array().ok_or_else(|| wrong("rich takes an array of runs, each {\"text\": …}".into()))?;
+    if runs.is_empty() || runs.len() > MAX_RUNS {
+        return Err(wrong(format!("give 1 to {MAX_RUNS} runs")));
+    }
+    let base = Style::of_da(&f.da);
+    let mut paragraphs = vec![Paragraph { align: None, spans: Vec::new() }];
+    let mut chars = 0usize;
+    for (i, run) in runs.iter().enumerate() {
+        let n = i.saturating_add(1);
+        let o = run.as_object().ok_or_else(|| wrong(format!("run {n} must be an object such as {{\"text\": \"…\", \"bold\": true}}")))?;
+        if let Some(k) = o.keys().find(|k| !["text", "bold", "italic", "underline", "size", "color", "font"].contains(&k.as_str())) {
+            return Err(wrong(format!("run {n} has {k:?}; runs take text, bold, italic, underline, size, color and font")));
+        }
+        let text = o.get("text").and_then(Value::as_str).ok_or_else(|| wrong(format!("run {n} needs text (a string)")))?;
+        chars = chars.saturating_add(text.chars().count());
+        if chars > MAX_RICH_CHARS {
+            return Err(wrong(format!("formatted text is limited to {MAX_RICH_CHARS} characters")));
+        }
+        let flag = |key: &str, default: bool| match o.get(key) {
+            None => Ok(default),
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(_) => Err(wrong(format!("run {n}: {key} must be true or false"))),
+        };
+        let size = match o.get("size") {
+            None => base.size,
+            Some(s) => s
+                .as_f64()
+                .filter(|s| s.is_finite() && (1.0..=300.0).contains(s))
+                .ok_or_else(|| wrong(format!("run {n}: size must be 1 to 300 points")))?,
+        };
+        let color = match o.get("color") {
+            None => base.color,
+            Some(c) => crate::comments::parse_color(c.as_str().ok_or_else(|| wrong(format!("run {n}: color must be a string")))?)?,
+        };
+        let family = match o.get("font").map(|v| v.as_str()) {
+            None => base.family,
+            Some(Some("helvetica")) => Family::Helvetica,
+            Some(Some("times")) => Family::Times,
+            Some(Some("courier")) => Family::Courier,
+            Some(_) => return Err(wrong(format!("run {n}: font must be helvetica, times or courier"))),
+        };
+        let style =
+            Style { family, bold: flag("bold", base.bold)?, italic: flag("italic", base.italic)?, size, color, underline: flag("underline", false)? };
+        for (j, part) in text.split('\n').enumerate() {
+            if j > 0 {
+                paragraphs.push(Paragraph { align: None, spans: Vec::new() });
+            }
+            let part = part.trim_end_matches('\r');
+            if !part.is_empty()
+                && let Some(p) = paragraphs.last_mut()
+            {
+                p.spans.push(Span { text: part.to_string(), style });
+            }
+        }
+    }
+    Ok(FieldValue::Rich(RichValue { paragraphs }))
+}
+
 impl Automation {
     pub(crate) fn form_fields(&self, a: &Args) -> Result<Value> {
         let doc = self.doc(a)?;
@@ -303,6 +375,10 @@ impl Automation {
                 let o = &mut more;
                 if let Some(t) = &f.tooltip {
                     o.insert("tooltip".into(), json!(t));
+                }
+                // A text field set to rich text: a plain value written to it drops its formatting.
+                if f.kind == FormFieldKind::Text && f.has(field_flags::RICH_TEXT) {
+                    o.insert("rich_text".into(), json!(true));
                 }
                 if let Some(s) = doc.field_check_style(&f.name) {
                     o.insert("check_style".into(), json!(s.label().to_lowercase()));
@@ -396,26 +472,37 @@ impl Automation {
 
     pub(crate) fn form_fill(&mut self, a: &Args) -> Result<Value> {
         let doc = self.doc(a)?;
-        let values = a
-            .get("values")
-            .and_then(Value::as_object)
-            .ok_or_else(|| ToolError::InvalidArgs("values must be an object of field name → value".into()))?;
-        if values.is_empty() {
-            return Err(ToolError::InvalidArgs("values is empty".into()));
+        let object = |key: &str| match a.get(key) {
+            None | Some(Value::Null) => Ok(serde_json::Map::new()),
+            Some(Value::Object(o)) => Ok(o.clone()),
+            Some(_) => Err(ToolError::InvalidArgs(format!("{key} must be an object of field name → value"))),
+        };
+        let (values, rich) = (object("values")?, object("rich")?);
+        if values.is_empty() && rich.is_empty() {
+            return Err(ToolError::InvalidArgs("values and rich are both empty: give at least one field".into()));
         }
+        if let Some(name) = values.keys().find(|n| rich.contains_key(*n)) {
+            return Err(ToolError::InvalidArgs(format!("{name:?} is in both values and rich: give it once")));
+        }
+        let field = |name: &String| {
+            doc.form.iter().find(|f| &f.name == name).ok_or_else(|| failed(format!("there is no field named {name:?} (see form_fields)")))
+        };
         let mut edits = Vec::new();
-        for (name, v) in values {
-            let f = doc.form.iter().find(|f| &f.name == name).ok_or_else(|| failed(format!("there is no field named {name:?} (see form_fields)")))?;
-            edits.push(Edit::SetFieldValue { name: name.clone(), value: value_for(f, v)? });
+        for (name, v) in &values {
+            edits.push(Edit::SetFieldValue { name: name.clone(), value: value_for(field(name)?, v)? });
+        }
+        for (name, v) in &rich {
+            edits.push(Edit::SetFieldValue { name: name.clone(), value: rich_for(field(name)?, v)? });
         }
         let edit = if edits.len() == 1 { edits.remove(0) } else { Edit::Batch { label: "Fill in form".into(), edits } };
         let mut out = self.apply(a, edit)?;
-        out["filled"] = json!(values.len());
+        out["filled"] = json!(values.len() + rich.len());
         // A value the box cuts off at a fixed font size is saved whole but shows only in part:
         // said, not silent (#4018).
         let doc = self.doc(a)?;
         let cut: Vec<Value> = values
             .keys()
+            .chain(rich.keys())
             .filter_map(|name| doc.field_overflow(name).map(|(page, o)| (name, page, o)))
             .map(|(name, page, o)| {
                 let page = page.map(|p| format!(" (page {})", p.saturating_add(1))).unwrap_or_default();

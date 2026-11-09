@@ -1029,17 +1029,6 @@ fn inherited_text(doc: &Document, field: pdfcraft_cos::ObjRef, key: &[u8]) -> Op
     None
 }
 
-/// A `/DA` colour operation (`g`, `rg` or `k`) as RGB; black when it isn't one.
-fn da_rgb(color: &str) -> [f64; 3] {
-    let nums: Vec<f64> = color.split_whitespace().filter_map(|t| t.parse().ok()).filter(|x: &f64| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).collect();
-    match nums.as_slice() {
-        [g] => [*g; 3],
-        [r, g, b] => [*r, *g, *b],
-        [c, m, y, k] => [(1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k)],
-        _ => [0.0; 3],
-    }
-}
-
 /// The rich text value to draw for `text` in a text field set to rich text (§12.7.4.3): its
 /// `/RV` over the style of its `/DA` and `/DS` (the field's, else the form's). `None` for a field
 /// drawn plain: not rich text, a comb or password field, no `/RV` that can be read, or a `/RV`
@@ -1060,7 +1049,7 @@ fn rich_value(doc: &Document, f: &Field, da: &Da, text: &str) -> Option<RichValu
             font.as_dict()?.name(b"BaseFont").map(|b| String::from_utf8_lossy(b).into_owned())
         })
         .unwrap_or_else(|| da.font.clone());
-    let base = Style::of_font(&font_name, da.size, da_rgb(&da.color));
+    let base = Style::of_font(&font_name, da.size, rich::da_rgb(&da.color));
     rich::parse(&rv, ds.as_deref(), base).filter(|r| r.matches(text))
 }
 

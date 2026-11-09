@@ -85,6 +85,13 @@ impl Style {
         Style { family, bold, italic, size, color, underline: false }
     }
 
+    /// The style a `/DA` string sets (`/HeBo 12 Tf 1 0 0 rg`): its font's family, weight and
+    /// posture by name, its size (0 is automatic) and its colour.
+    pub fn of_da(da: &str) -> Style {
+        let parsed = crate::appearance::parse_da(da);
+        Style::of_font(&parsed.font, parsed.size, da_rgb(&parsed.color))
+    }
+
     /// The standard-14 font this style is drawn in.
     pub fn font(&self) -> Std14 {
         match (self.family, self.bold, self.italic) {
@@ -129,6 +136,31 @@ impl Style {
         self
     }
 
+    /// This style as CSS declarations, every property written, so a run reads back the same
+    /// whatever the default style is. An automatic size (0) is left out.
+    fn css(&self) -> String {
+        let family = match self.family {
+            Family::Helvetica => "Helvetica",
+            Family::Times => "Times",
+            Family::Courier => "Courier",
+        };
+        let hex = |x: f64| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let [r, g, b] = self.color;
+        let mut css = format!(
+            "font-family:{family};font-weight:{};font-style:{};color:#{:02x}{:02x}{:02x};text-decoration:{}",
+            if self.bold { "bold" } else { "normal" },
+            if self.italic { "italic" } else { "normal" },
+            hex(r),
+            hex(g),
+            hex(b),
+            if self.underline { "underline" } else { "none" },
+        );
+        if self.size > 0.0 {
+            css.push_str(&format!(";font-size:{}pt", crate::appearance::fmt(self.size)));
+        }
+        css
+    }
+
     /// The CSS `font` shorthand: `[style] [weight] size[/line-height] family-list`, the form
     /// `/DS` strings use (`font: Helvetica 12pt` is read too, family first).
     fn with_font_shorthand(mut self, value: &str) -> Style {
@@ -148,6 +180,17 @@ impl Style {
             self.family = f;
         }
         self
+    }
+}
+
+/// A `/DA` colour operation (`g`, `rg` or `k`) as RGB; black when it isn't one.
+pub(crate) fn da_rgb(color: &str) -> [f64; 3] {
+    let nums: Vec<f64> = color.split_whitespace().filter_map(|t| t.parse().ok()).filter(|x: &f64| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).collect();
+    match nums.as_slice() {
+        [g] => [*g; 3],
+        [r, g, b] => [*r, *g, *b],
+        [c, m, y, k] => [(1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k)],
+        _ => [0.0; 3],
     }
 }
 
@@ -244,6 +287,40 @@ impl RichValue {
         self.paragraphs.iter().map(|p| p.spans.iter().map(|s| s.text.replace('\n', "\r")).collect::<String>()).collect::<Vec<_>>().join("\r")
     }
 
+    /// This value as a `/RV` body (§12.7.4.3): a paragraph per paragraph, a `span` per run with
+    /// its whole style, and `br` for a line break, so it reads back as the same runs.
+    pub fn to_xhtml(&self) -> String {
+        let mut out = String::from(
+            "<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:xfa=\"http://www.xfa.org/schema/xfa-data/1.0/\" xfa:spec=\"2.1\">",
+        );
+        for p in &self.paragraphs {
+            match p.align {
+                Some(a) => {
+                    let a = match a {
+                        Align::Left => "left",
+                        Align::Center => "center",
+                        Align::Right => "right",
+                    };
+                    out.push_str(&format!("<p dir=\"ltr\" style=\"text-align:{a}\">"));
+                }
+                None => out.push_str("<p dir=\"ltr\">"),
+            }
+            for span in &p.spans {
+                out.push_str(&format!("<span style=\"{}\">", span.style.css()));
+                for (i, part) in span.text.split('\n').enumerate() {
+                    if i > 0 {
+                        out.push_str("<br/>");
+                    }
+                    out.push_str(&escape(part));
+                }
+                out.push_str("</span>");
+            }
+            out.push_str("</p>");
+        }
+        out.push_str("</body>");
+        out
+    }
+
     /// Whether this is the rich form of `value`: the same words in the same order, whatever the
     /// line breaks and runs of spaces between them. A `/RV` another app left behind after `/V`
     /// changed is not, and is not drawn.
@@ -334,6 +411,23 @@ impl Reader {
     }
 }
 
+/// Text as XML character data: `&`, `<` and `>` escaped (and `"`, for attribute values too).
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            // Characters XML 1.0 doesn't allow, even escaped: dropped rather than written.
+            c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn text_align(css: &str) -> Option<Align> {
     css.split(';').find_map(|decl| {
         let (prop, value) = decl.split_once(':')?;
@@ -399,6 +493,37 @@ mod tests {
         assert_eq!(parse(&huge, None, BASE), None);
         let deep = format!("{}text{}", "<span>".repeat(5000), "</span>".repeat(5000));
         assert!(parse(&deep, None, BASE).is_none_or(|r| r.plain_text().len() <= 4), "deep nesting is bounded, not followed");
+    }
+
+    #[test]
+    fn a_written_value_reads_back_as_the_same_runs() {
+        let style = |bold, italic, size, color, underline| Style { family: Family::Times, bold, italic, size, color, underline };
+        let rich = RichValue {
+            paragraphs: vec![
+                Paragraph {
+                    align: None,
+                    spans: vec![
+                        Span { text: "Fish & <chips> \"now\"".into(), style: style(true, false, 12.0, [1.0, 0.0, 0.0], false) },
+                        Span { text: " then\nlater".into(), style: style(false, true, 0.0, [0.0, 0.0, 1.0], true) },
+                    ],
+                },
+                Paragraph {
+                    align: Some(Align::Right),
+                    spans: vec![Span { text: "Zürich".into(), style: style(false, false, 9.5, [0.0; 3], false) }],
+                },
+            ],
+        };
+        let xhtml = rich.to_xhtml();
+        // A run with an automatic size reads back automatic over a field whose size is (`0 Tf`).
+        assert_eq!(parse(&xhtml, None, Style { size: 0.0, ..BASE }), Some(rich.clone()), "{xhtml}");
+        assert_eq!(rich.plain_text(), "Fish & <chips> \"now\" then\rlater\rZürich");
+    }
+
+    #[test]
+    fn the_style_of_a_da_is_its_font_size_and_colour() {
+        let s = Style::of_da("/TiBI 9 Tf 0 0 1 rg");
+        assert_eq!((s.family, s.bold, s.italic, s.size, s.color), (Family::Times, true, true, 9.0, [0.0, 0.0, 1.0]));
+        assert_eq!(Style::of_da("/Helv 0 Tf 0 g").size, 0.0, "automatic");
     }
 
     #[test]
