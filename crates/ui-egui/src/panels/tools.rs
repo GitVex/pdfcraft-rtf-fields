@@ -19,15 +19,22 @@ pub fn left_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     }
     egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin { left: 14, right: 14, top: 12, bottom: 10 }).stroke(Stroke::new(1.0, t.divider)).show(
         ui,
-        |ui| match app.left {
-            // Organize pages has its own panel whenever the grid shows (with a document open).
-            _ if app.active.is_some() && crate::organize_panel::showing(app) => crate::organize_panel::panel(app, ui, &t),
-            LeftPanel::AllTools => all_tools(app, ui, &t),
-            LeftPanel::Tool(id) => match catalog::group(id) {
-                Some(g) => tool_detail(app, ui, &t, g),
-                None => app.left = LeftPanel::AllTools,
-            },
-            LeftPanel::CalculationOrder => crate::calc_order_ui::panel(app, ui, &t),
+        |ui| {
+            // While a rich text field is filled in, Format text formats it (#11), above the panel.
+            if let Some(view) = app.active.and_then(|i| app.views.get_mut(i)).filter(|v| crate::forms_ui::editing_rich(v)) {
+                crate::forms_ui::format_panel(view, ui, &t);
+                ui.separator();
+            }
+            match app.left {
+                // Organize pages has its own panel whenever the grid shows (with a document open).
+                _ if app.active.is_some() && crate::organize_panel::showing(app) => crate::organize_panel::panel(app, ui, &t),
+                LeftPanel::AllTools => all_tools(app, ui, &t),
+                LeftPanel::Tool(id) => match catalog::group(id) {
+                    Some(g) => tool_detail(app, ui, &t, g),
+                    None => app.left = LeftPanel::AllTools,
+                },
+                LeftPanel::CalculationOrder => crate::calc_order_ui::panel(app, ui, &t),
+            }
         },
     );
 }

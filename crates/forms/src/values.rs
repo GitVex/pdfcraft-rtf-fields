@@ -324,6 +324,7 @@ fn write_rich(doc: &mut Document, f: &Field, rich: &crate::rich::RichValue, scri
     if !rich.matches(&taken) {
         return invalid(format!("{:?}'s scripts changed the text to {taken:?}, so it can't keep its formatting", f.name));
     }
+    embed_rich_faces(doc, rich)?;
     let flags = f.flags | flags::RICH_TEXT;
     doc.update_dict(f.obj, |d| {
         d.set(b"RV".to_vec(), PdfString::text(&rich.to_xhtml()));
@@ -331,6 +332,28 @@ fn write_rich(doc: &mut Document, f: &Field, rich: &crate::rich::RichValue, scri
     })?;
     let shown = Field { flags, ..f.clone() };
     redraw(doc, &shown, std::slice::from_ref(&taken), scripts)
+}
+
+/// Embed in the form's `/DR` the craft-fonts faces `rich`'s runs name that it doesn't have yet
+/// (#12), so the runs are drawn in them, as a field set to that font is (#7). A face the form has
+/// already, or one this build lacks, is left alone: the run is drawn as #9 and #14 say.
+fn embed_rich_faces(doc: &mut Document, rich: &crate::rich::RichValue) -> Result<(), FormError> {
+    let mut wanted: Vec<crate::FieldFont> = Vec::new();
+    for style in rich.paragraphs.iter().flat_map(|p| &p.spans).map(|s| &s.style) {
+        let Some(face) = style.face else { continue };
+        if appearance::has_form_face(doc, face.as_str(), style.bold, style.italic) {
+            continue;
+        }
+        if let Some(font) = crate::FieldFont::craft_for(face.as_str(), style.bold, style.italic)
+            && !wanted.contains(&font)
+        {
+            wanted.push(font);
+        }
+    }
+    for font in wanted {
+        crate::author::ensure_form_font(doc, font)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn write_value(doc: &mut Document, f: &Field, value: &FieldValue, scripts: &mut dyn Scripts) -> Result<(), FormError> {

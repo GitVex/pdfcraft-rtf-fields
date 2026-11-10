@@ -85,8 +85,8 @@ fn look_arg(v: &Value) -> Result<pdfcraft_engine::FieldLookPatch> {
             .transpose()?,
         font: string("font")?
             .map(|s| {
-                FieldFont::ALL.into_iter().find(|f| f.key() == s).ok_or_else(|| {
-                    let known: Vec<&str> = FieldFont::ALL.iter().map(|f| f.key()).collect();
+                FieldFont::all().into_iter().find(|f| f.key() == s).ok_or_else(|| {
+                    let known: Vec<&str> = FieldFont::all().iter().map(|f| f.key()).collect();
                     bad(format!("unknown font {s:?} ({})", known.join(", ")))
                 })
             })
@@ -278,9 +278,10 @@ const MAX_RICH_CHARS: usize = 100_000;
 
 /// A `rich` entry → formatted text for a text field: runs `{text, bold, italic, underline, size,
 /// color, font}`, a `\n` in text starting a new paragraph. What a run doesn't set comes from the
-/// field's `/DA` (font, size, colour).
-fn rich_for(f: &FormField, v: &Value) -> Result<FieldValue> {
-    use pdfcraft_engine::form_rich::{Family, Paragraph, RichValue, Span, Style};
+/// field's `/DA` (font, size, colour). A font is a standard family or one of `families` (the
+/// form's fonts and the craft-fonts families, by name).
+fn rich_for(f: &FormField, v: &Value, families: &[String]) -> Result<FieldValue> {
+    use pdfcraft_engine::form_rich::{Align, Face, Family, Paragraph, RichValue, Span, Style};
     let wrong = |what: String| ToolError::InvalidArgs(format!("{}: {what}", f.name));
     if f.kind != FormFieldKind::Text {
         return Err(wrong(format!("formatted text is only for text fields, and this is a {}", kind_name(f.kind))));
@@ -295,9 +296,18 @@ fn rich_for(f: &FormField, v: &Value) -> Result<FieldValue> {
     for (i, run) in runs.iter().enumerate() {
         let n = i.saturating_add(1);
         let o = run.as_object().ok_or_else(|| wrong(format!("run {n} must be an object such as {{\"text\": \"…\", \"bold\": true}}")))?;
-        if let Some(k) = o.keys().find(|k| !["text", "bold", "italic", "underline", "size", "color", "font"].contains(&k.as_str())) {
-            return Err(wrong(format!("run {n} has {k:?}; runs take text, bold, italic, underline, size, color and font")));
+        if let Some(k) = o.keys().find(|k| !["text", "bold", "italic", "underline", "size", "color", "font", "align"].contains(&k.as_str())) {
+            return Err(wrong(format!("run {n} has {k:?}; runs take text, bold, italic, underline, size, color, font and align")));
         }
+        // The alignment of the paragraphs the run's text is in (#13); without one they follow
+        // the field's own.
+        let align = match o.get("align").map(|v| v.as_str()) {
+            None => None,
+            Some(Some("left")) => Some(Align::Left),
+            Some(Some("center")) => Some(Align::Center),
+            Some(Some("right")) => Some(Align::Right),
+            Some(_) => return Err(wrong(format!("run {n}: align must be left, center or right"))),
+        };
         let text = o.get("text").and_then(Value::as_str).ok_or_else(|| wrong(format!("run {n} needs text (a string)")))?;
         chars = chars.saturating_add(text.chars().count());
         if chars > MAX_RICH_CHARS {
@@ -325,7 +335,14 @@ fn rich_for(f: &FormField, v: &Value) -> Result<FieldValue> {
             Some(Some("helvetica")) => (Family::Helvetica, None),
             Some(Some("times")) => (Family::Times, None),
             Some(Some("courier")) => (Family::Courier, None),
-            Some(_) => return Err(wrong(format!("run {n}: font must be helvetica, times or courier"))),
+            // A form font or craft-fonts family (#12), named as form_fields' rich_fonts lists it.
+            Some(Some(name)) if let Some(name) = families.iter().find(|f| f.eq_ignore_ascii_case(name.trim())) => {
+                (Family::standing_in_for(name), Face::named(name))
+            }
+            Some(_) => {
+                let all = ["helvetica", "times", "courier"].into_iter().chain(families.iter().map(String::as_str)).collect::<Vec<_>>().join(", ");
+                return Err(wrong(format!("run {n}: font must be one of {all}")));
+            }
         };
         let style = Style {
             family,
@@ -341,6 +358,17 @@ fn rich_for(f: &FormField, v: &Value) -> Result<FieldValue> {
                 paragraphs.push(Paragraph { align: None, spans: Vec::new() });
             }
             let part = part.trim_end_matches('\r');
+            // The paragraphs the run puts text in, or starts: not the one a leading `\n` ends.
+            if let Some(align) = align.filter(|_| j > 0 || !part.is_empty())
+                && let Some(p) = paragraphs.last_mut()
+            {
+                match p.align {
+                    Some(set) if set != align => {
+                        return Err(wrong(format!("run {n}: its paragraph is already aligned by an earlier run; give a paragraph one align")));
+                    }
+                    _ => p.align = Some(align),
+                }
+            }
             if !part.is_empty()
                 && let Some(p) = paragraphs.last_mut()
             {
@@ -475,7 +503,7 @@ impl Automation {
                 v
             })
             .collect();
-        Ok(json!({ "count": out.len(), "fields": out }))
+        Ok(json!({ "count": out.len(), "fields": out, "rich_fonts": doc.rich_font_families() }))
     }
 
     pub(crate) fn form_fill(&mut self, a: &Args) -> Result<Value> {
@@ -495,12 +523,13 @@ impl Automation {
         let field = |name: &String| {
             doc.form.iter().find(|f| &f.name == name).ok_or_else(|| failed(format!("there is no field named {name:?} (see form_fields)")))
         };
+        let families = if rich.is_empty() { Vec::new() } else { doc.rich_font_families() };
         let mut edits = Vec::new();
         for (name, v) in &values {
             edits.push(Edit::SetFieldValue { name: name.clone(), value: value_for(field(name)?, v)? });
         }
         for (name, v) in &rich {
-            edits.push(Edit::SetFieldValue { name: name.clone(), value: rich_for(field(name)?, v)? });
+            edits.push(Edit::SetFieldValue { name: name.clone(), value: rich_for(field(name)?, v, &families)? });
         }
         let edit = if edits.len() == 1 { edits.remove(0) } else { Edit::Batch { label: "Fill in form".into(), edits } };
         let mut out = self.apply(a, edit)?;

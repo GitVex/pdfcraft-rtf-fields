@@ -2506,3 +2506,308 @@ fn a_pointer_resting_on_a_list_the_keys_scroll_keeps_the_highlight_on_the_keys()
     h.run_steps(3);
     assert_eq!(value(&h, "country"), ["2900"], "the item End went to, not the one under the pointer");
 }
+
+/// A form with one multiline rich text field, "notes", holding "Sneak Attack" with "Sneak" bold.
+fn rich_form() -> Vec<u8> {
+    rich_form_with("<body><p><b>Sneak</b> Attack</p></body>", "Sneak Attack", "")
+}
+
+/// A one-page form whose text field "notes" has the rich value `rv` for `value`, with `extra`
+/// entries in its dictionary (`/Q 2`).
+fn rich_form_with(rv: &str, value: &str, extra: &str) -> Vec<u8> {
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 400] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>".to_string(),
+        "<< /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 6 0 R >> >> >>".to_string(),
+        format!(
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /Ff {} /DA (/Helv 12 Tf 0 g) /V ({value}) /RV ({rv}) /Rect [20 300 280 360] /P 3 0 R {extra}>>",
+            pdfcraft_engine::field_flags::RICH_TEXT | pdfcraft_engine::field_flags::MULTILINE
+        ),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    pdf
+}
+
+/// The bold runs of the field "notes"' rich value.
+fn bold_runs(h: &Harness<'static, PdfCraftApp>) -> Vec<String> {
+    let s = h.state();
+    let rich = s.session.get(s.views[0].id).unwrap().field_rich_value("notes").expect("a rich value");
+    rich.paragraphs.iter().flat_map(|p| &p.spans).filter(|s| s.style.bold).map(|s| s.text.clone()).collect()
+}
+
+/// Issue #11: a rich text field opens with its formatting; Bold in the Format text panel applies to
+/// the selection without closing the field, and committing writes the formatting as one undoable
+/// step.
+#[test]
+fn bold_from_the_format_panel_formats_a_rich_fields_selection() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    assert_eq!(bold_runs(&h), ["Sneak"]);
+    click_field(&mut h, "notes", 0);
+    {
+        let fx = h.state().views[0].forms.focus.as_ref().expect("the editor opened");
+        assert!(fx.rich.is_some(), "with its formatting");
+        assert_eq!(fx.text, "Sneak Attack");
+    }
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    // Clicked with the pointer, as a person does: the press takes the keyboard from the field.
+    let bold = h.get_by_label("Bold").rect().center();
+    click_at(&mut h, bold);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_some(), "the panel's click keeps the field open");
+    // A panel control that takes the keyboard (the font size box) keeps it open too.
+    let size = h.get_by_label("Font size").rect().center();
+    click_at(&mut h, size);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_some(), "the font size box takes the keyboard, and the field stays open");
+    // A click on the page away from the field commits it.
+    let below = {
+        let s = h.state();
+        let doc = s.session.get(s.views[0].id).unwrap();
+        let f = doc.form.iter().find(|f| f.name == "notes").unwrap();
+        let r = pdfcraft_ui_egui::forms_ui::field_screen_rect(&s.views[0], &doc.info, f, 0).unwrap();
+        egui::pos2(r.center().x, r.max.y + 60.0)
+    };
+    click_at(&mut h, below);
+    assert!(h.state().views[0].forms.focus.is_none(), "committed");
+    assert_eq!(bold_runs(&h), ["Sneak Attack"], "the whole selection is bold");
+    // One undo step brings the field's own formatting back.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    assert_eq!(bold_runs(&h), ["Sneak"]);
+}
+
+/// The runs of the field "notes" (text, style) after saving the document and opening the saved
+/// bytes in a fresh app.
+fn saved_runs(h: &Harness<'static, PdfCraftApp>) -> Vec<(String, pdfcraft_engine::form_rich::Style)> {
+    let s = h.state();
+    let bytes = s.session.save_bytes(s.views[0].id).unwrap();
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.open_bytes("saved.pdf", None, bytes.to_vec()).unwrap();
+    let rich = app.session.get(app.views[0].id).unwrap().field_rich_value("notes").expect("a rich value");
+    rich.paragraphs.iter().flat_map(|p| &p.spans).map(|r| (r.text.clone(), r.style)).collect()
+}
+
+/// Select the last `n` characters of the field being edited, from the keyboard.
+fn select_last(h: &mut Harness<'static, PdfCraftApp>, n: usize) {
+    h.key_press(egui::Key::End);
+    h.run_steps(1);
+    for _ in 0..n {
+        h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowLeft);
+        h.run_steps(1);
+    }
+}
+
+/// Commit the field "notes" by clicking the page below it.
+fn commit(h: &mut Harness<'static, PdfCraftApp>) {
+    let below = {
+        let s = h.state();
+        let doc = s.session.get(s.views[0].id).unwrap();
+        let f = doc.form.iter().find(|f| f.name == "notes").unwrap();
+        let r = pdfcraft_ui_egui::forms_ui::field_screen_rect(&s.views[0], &doc.info, f, 0).unwrap();
+        egui::pos2(r.center().x, r.max.y + 60.0)
+    };
+    click_at(h, below);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_none(), "committed");
+}
+
+/// Issue #12: a size picked in Format text applies to the selected part of a line only, and is
+/// kept by the saved file; a selection of two sizes then shows its size as mixed.
+#[test]
+fn a_size_from_format_text_applies_to_part_of_a_line() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    select_last(&mut h, 6);
+    let arrow = h.get_by_label("Font size").rect().center();
+    click_at(&mut h, arrow);
+    h.run_steps(2);
+    let preset = h.get_by_label("18 pt").rect().center();
+    click_at(&mut h, preset);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_some(), "the field stays open");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    assert!(h.query_all_by_value("Mixed").next().is_some(), "two sizes selected show as mixed");
+    commit(&mut h);
+    let runs: Vec<(String, f64)> = saved_runs(&h).into_iter().map(|(t, s)| (t, s.size)).collect();
+    assert_eq!(runs, [("Sneak".to_string(), 12.0), (" ".to_string(), 12.0), ("Attack".to_string(), 18.0)]);
+}
+
+/// Issue #12: a colour picked in Format text applies across both runs of the selection, each
+/// keeping its own weight, and is kept by the saved file.
+#[test]
+fn a_colour_from_format_text_applies_across_two_runs() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    let swatch = h.get_by_label("Colour").rect().center();
+    click_at(&mut h, swatch);
+    h.run_steps(2);
+    let red = h.get_by_label("Red").rect().center();
+    click_at(&mut h, red);
+    h.run_steps(2);
+    commit(&mut h);
+    let runs = saved_runs(&h);
+    assert_eq!(runs.iter().map(|(t, s)| (t.as_str(), s.bold)).collect::<Vec<_>>(), [("Sneak", true), (" Attack", false)]);
+    for (text, style) in &runs {
+        let [r, g, b] = style.color;
+        assert!((r - 0.89).abs() < 0.01 && (g - 0.13).abs() < 0.01 && (b - 0.13).abs() < 0.01, "{text} is red: {:?}", style.color);
+    }
+}
+
+/// Issue #12: a font family picked in Format text applies to the selection, keeping its weight:
+/// a standard one (Times), and, with the craft-fonts Latin faces, one of those (Carlito), which the
+/// saved file then embeds.
+#[test]
+fn a_font_from_format_text_applies_to_the_selection() {
+    use pdfcraft_engine::form_rich::Family;
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    let pick = |h: &mut Harness<'static, PdfCraftApp>, name: &str| {
+        let list = h.get_by_label("Font").rect().center();
+        click_at(h, list);
+        h.run_steps(2);
+        let item = h.get_by_label(name).rect().center();
+        click_at(h, item);
+        h.run_steps(2);
+    };
+    pick(&mut h, "Times");
+    commit(&mut h);
+    let runs = saved_runs(&h);
+    assert_eq!(
+        runs.iter().map(|(t, s)| (t.as_str(), s.family, s.face.is_none(), s.bold)).collect::<Vec<_>>(),
+        [("Sneak", Family::Times, true, true), (" Attack", Family::Times, true, false)]
+    );
+    let offered = {
+        let s = h.state();
+        s.session.get(s.views[0].id).unwrap().rich_font_families()
+    };
+    if !offered.iter().any(|f| f == "Carlito") {
+        return;
+    }
+    click_field(&mut h, "notes", 0);
+    select_last(&mut h, 6);
+    pick(&mut h, "Carlito");
+    commit(&mut h);
+    let runs = saved_runs(&h);
+    let faces: Vec<(&str, Option<&str>)> = runs.iter().map(|(t, s)| (t.as_str(), s.face.as_ref().map(|f| f.as_str()))).collect();
+    assert_eq!(faces, [("Sneak", None), (" ", None), ("Attack", Some("Carlito"))]);
+}
+
+/// Issue #13: Format text's alignment sets the paragraph the caret is in, and only that one: the
+/// next paragraph keeps following the field's own alignment (`/Q`), in the saved file.
+#[test]
+fn alignment_from_format_text_sets_the_carets_paragraph() {
+    use pdfcraft_engine::form_rich::Align;
+    let rv = "<body><p>First</p><p>Second</p></body>";
+    let mut h = harness_with_bytes("aligned.pdf", rich_form_with(rv, "First\\rSecond", "/Q 2 "));
+    click_field(&mut h, "notes", 0);
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.text.as_str()), Some("First\nSecond"));
+    // Into the first paragraph.
+    for key in [egui::Key::End, egui::Key::ArrowUp] {
+        h.key_press(key);
+        h.run_steps(1);
+    }
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.selection.end <= 5), Some(true), "the caret is in \"First\"");
+    let button = h.get_by_label("Alignment").rect().center();
+    click_at(&mut h, button);
+    h.run_steps(2);
+    // The button shows the paragraph's alignment: the field's own, right.
+    let centre = h.get_by_label("Centre").rect().center();
+    click_at(&mut h, centre);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_some(), "the field stays open");
+    commit(&mut h);
+    let s = h.state();
+    let bytes = s.session.save_bytes(s.views[0].id).unwrap();
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.open_bytes("saved.pdf", None, bytes.to_vec()).unwrap();
+    let rich = app.session.get(app.views[0].id).unwrap().field_rich_value("notes").expect("a rich value");
+    assert_eq!(rich.paragraphs.iter().map(|p| p.align).collect::<Vec<_>>(), [Some(Align::Center), None]);
+}
+
+/// How many top-level bookmarks the document has.
+fn bookmark_count(h: &Harness<'static, PdfCraftApp>) -> usize {
+    let s = h.state();
+    s.session.get(s.views[0].id).unwrap().info.outline.len()
+}
+
+/// Issue #8: in a rich text field ⌘B, ⌘I and ⌘U format the selection, and New bookmark (⌘B)
+/// doesn't fire while a field has the keys.
+#[test]
+fn command_b_i_u_format_a_rich_fields_selection_and_add_no_bookmark() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    let bookmarks = bookmark_count(&h);
+    click_field(&mut h, "notes", 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    for key in [egui::Key::B, egui::Key::I, egui::Key::U] {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, key);
+        h.run_steps(2);
+    }
+    assert!(h.state().views[0].forms.focus.is_some(), "still typing");
+    h.key_press(egui::Key::Tab);
+    h.run_steps(4);
+    let s = h.state();
+    let rich = s.session.get(s.views[0].id).unwrap().field_rich_value("notes").unwrap();
+    let runs: Vec<(String, bool, bool, bool)> =
+        rich.paragraphs.iter().flat_map(|p| &p.spans).map(|r| (r.text.clone(), r.style.bold, r.style.italic, r.style.underline)).collect();
+    // "Sneak" was bold and " Attack" wasn't: ⌘B on the mixed selection makes it all bold.
+    assert_eq!(runs, [("Sneak Attack".to_string(), true, true, true)]);
+    assert_eq!(bookmark_count(&h), bookmarks, "⌘B in the field added no bookmark");
+}
+
+/// Issue #8: ⌘B in a plain text field does nothing, neither formatting nor a bookmark; on the
+/// page, it still adds one.
+#[test]
+fn command_b_in_a_plain_field_adds_no_bookmark_but_does_on_the_page() {
+    let mut h = harness();
+    let bookmarks = bookmark_count(&h);
+    click_field(&mut h, "name", 0);
+    h.event(egui::Event::Text("Ada".into()));
+    h.run_steps(1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::B);
+    h.run_steps(3);
+    assert_eq!(bookmark_count(&h), bookmarks, "no bookmark while typing");
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.text.as_str()), Some("Ada"), "the field is untouched");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.state().views[0].forms.focus.is_none());
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::B);
+    h.run_steps(3);
+    assert!(bookmark_count(&h) > bookmarks || h.query_all_by_value("Untitled").next().is_some(), "on the page, ⌘B adds a bookmark");
+}
+
+/// Issue #8: ⌘E in a rich text field opens the left panel, which shows Format text for it.
+#[test]
+fn command_e_in_a_rich_field_shows_format_text() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    h.state_mut().set_option("left", "closed").unwrap();
+    h.run_steps(3);
+    click_field(&mut h, "notes", 0);
+    assert!(h.query_by_label("Bold").is_none(), "the panel is closed");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::E);
+    h.run_steps(4);
+    assert!(h.state().left_open, "⌘E opened the left panel");
+    assert!(h.query_by_label("Bold").is_some(), "with Format text for the field");
+    assert!(h.state().views[0].forms.focus.is_some(), "the field is still being edited");
+}

@@ -300,7 +300,7 @@ pub(super) fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec
                     ShapedScript::Hebrew => shape_hebrew(&s, run_rtl).map_err(|e| hebrew_error(e, &s))?,
                     ShapedScript::Thai => shape_thai(&s).map_err(|e| thai_error(e, &s))?,
                     // Added text classifies runs as Arabic, Hebrew or Thai only.
-                    ShapedScript::Symbol(_) => return Err(EditError::Invalid(format!("{s:?} can't be shaped as a script"))),
+                    ShapedScript::Symbol(_) | ShapedScript::Twin(_) => return Err(EditError::Invalid(format!("{s:?} can't be shaped as a script"))),
                 };
                 Piece::Shaped(shaped)
             } else if run_rtl {

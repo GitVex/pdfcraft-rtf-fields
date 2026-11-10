@@ -297,7 +297,7 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool
                     let font_label = if d.font.apply { d.font.value.label().to_string() } else { d.font_label.clone() };
                     row(ui, "Font:", &mut d.font, |ui, v| {
                         craft_ui::ComboBox::from_id_salt("bulk-font").selected_text(tl!(&font_label)).show_ui(ui, |ui| {
-                            for font in FieldFont::ALL {
+                            for font in FieldFont::all() {
                                 ui.selectable_value(v, font, font.label());
                             }
                         });

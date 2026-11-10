@@ -54,6 +54,14 @@ pub struct Focus {
     /// Whether the text box had the keyboard at the end of the editor's last frame
     /// ([`crate::edit_text_ui::lost_focus_once`]).
     pub(crate) had_focus: bool,
+    /// A rich text field's formatting, one style per character of `text` (#11); `None` for other
+    /// fields. Loaded once the editor opens ([`load_rich`]).
+    pub rich: Option<super::rich_field::RichDraft>,
+    /// Whether [`load_rich`] has looked at this field yet.
+    pub rich_loaded: bool,
+    /// The editor's selection (characters), as last seen while it had the keyboard: what the
+    /// Format text panel formats.
+    pub selection: std::ops::Range<usize>,
 }
 
 /// A drop-down's open list: the first item shown, the item the keys or the pointer are on, and
@@ -88,6 +96,9 @@ pub struct FormView {
     pub unbaked: HashSet<(String, usize)>,
     /// A message for the app to show (e.g. "buttons run JavaScript").
     pub notice: Option<FormNotice>,
+    /// ⌘E in a rich text field asked for the Format text panel (#8): the app opens the left panel,
+    /// which shows it while the field is edited.
+    pub(crate) format_panel: bool,
     /// A push button was clicked: (its field name, what it does).
     pub button: Option<(String, pdfcraft_engine::form_scripts::ButtonAction)>,
     /// The focused check box or radio button was clicked. It toggles once no other edit is
@@ -363,6 +374,119 @@ fn open_focus(f: &FormField, widget: usize) -> Focus {
         calendar_text: None,
         list: ChoiceList::default(),
         had_focus: false,
+        rich: None,
+        rich_loaded: false,
+        selection: 0..0,
+    }
+}
+
+/// The open editor's field when it is a rich text field (#11): a text field with the rich text
+/// flag, not comb or password, whose text the editor shows run by run.
+fn rich_field<'a>(focus: &Focus, form: &'a [FormField]) -> Option<&'a FormField> {
+    focused_field(focus, form)
+        .filter(|f| f.kind == FormFieldKind::Text && f.has(field_flags::RICH_TEXT) && !f.is_comb() && !f.has(field_flags::PASSWORD))
+}
+
+/// When the editor has just opened on a rich text field, load its formatting (#11): its rich value
+/// as its appearance draws it, else its text in the field's own style. The editor's text becomes
+/// the rich value's plain text, a line per paragraph.
+pub(crate) fn load_rich(doc: &pdfcraft_engine::Document, view: &mut DocView, form: &[FormField]) {
+    let Some(fx) = view.forms.focus.as_mut().filter(|x| !x.rich_loaded) else { return };
+    fx.rich_loaded = true;
+    let Some(f) = rich_field(fx, form) else { return };
+    let base = pdfcraft_engine::form_rich::Style::of_da(&f.da);
+    let mut draft = super::rich_field::RichDraft::open(doc.field_rich_value(&f.name).as_ref(), base, &fx.text);
+    draft.fonts = doc.rich_font_families();
+    draft.quadding = match f.quadding {
+        1 => pdfcraft_engine::form_rich::Align::Center,
+        2 => pdfcraft_engine::form_rich::Align::Right,
+        _ => pdfcraft_engine::form_rich::Align::Left,
+    };
+    fx.text = draft.editor_text().to_string();
+    fx.rich = Some(draft);
+}
+
+/// Whether the active editor in `view` is on a rich text field, for the Format text panel.
+pub(crate) fn editing_rich(view: &DocView) -> bool {
+    view.forms.focus.as_ref().is_some_and(|x| x.rich.is_some())
+}
+
+/// The Format text panel for the rich text field being edited: bold, italic and underline
+/// (#11), and size, colour and font family (#12), shown for its selection (a mixed selection as
+/// mixed), or for the text typed next at the caret, and applied to it; alignment (#13) for the
+/// paragraphs the selection or caret touches. The editor then takes the keyboard back, keeping
+/// its selection.
+pub(crate) fn format_panel(view: &mut DocView, ui: &mut egui::Ui, t: &crate::theme::Tokens) {
+    use super::rich_field::{FontPick, Toggle, family_label};
+    use crate::format_text_ui::FontChoice;
+    let Some(fx) = view.forms.focus.as_mut() else { return };
+    let selection = fx.selection.clone();
+    let Some(draft) = fx.rich.as_mut() else { return };
+    let (size, mixed_size) = draft.common(&selection, |s| s.size.to_bits());
+    let (color, _) = draft.common(&selection, |s| s.color.map(f64::to_bits));
+    let (family, mixed_family) = draft.common(&selection, family_label);
+    let mut look = pdfcraft_engine::AddedText {
+        bold: draft.is_on(&selection, Toggle::Bold),
+        italic: draft.is_on(&selection, Toggle::Italic),
+        size: f64::from_bits(size),
+        color: color.map(f64::from_bits),
+        align: match draft.align(&selection) {
+            pdfcraft_engine::form_rich::Align::Left => pdfcraft_engine::TextAlign::Left,
+            pdfcraft_engine::form_rich::Align::Center => pdfcraft_engine::TextAlign::Center,
+            pdfcraft_engine::form_rich::Align::Right => pdfcraft_engine::TextAlign::Right,
+        },
+        ..Default::default()
+    };
+    let align_before = look.align;
+    let mut extras = crate::edit_text_ui::Extras { underline: draft.is_on(&selection, Toggle::Underline), ..Default::default() };
+    let before = (look.bold, look.italic, extras.underline, look.color);
+    let shown = if mixed_family { tl!("Mixed").to_string() } else { family };
+    let faces = draft.fonts.clone();
+    let fonts = crate::format_text_ui::Fonts { sources: None, shown, mixed_size, faces: &faces };
+    let out = crate::format_text_ui::panel(ui, t, &mut look, Some(&mut extras), fonts, None);
+    let mut changed = false;
+    for (what, was, now) in
+        [(Toggle::Bold, before.0, look.bold), (Toggle::Italic, before.1, look.italic), (Toggle::Underline, before.2, extras.underline)]
+    {
+        if was != now {
+            draft.toggle(&selection, what);
+            changed = true;
+        }
+    }
+    if out.size_committed {
+        draft.set_size(&selection, look.size);
+        changed = true;
+    }
+    if look.color != before.3 {
+        draft.set_color(&selection, look.color);
+        changed = true;
+    }
+    let pick = match out.font {
+        Some(FontChoice::Family(f)) => Some(FontPick::Standard(match f {
+            pdfcraft_engine::FontFamily::Helvetica => pdfcraft_engine::form_rich::Family::Helvetica,
+            pdfcraft_engine::FontFamily::Times => pdfcraft_engine::form_rich::Family::Times,
+            pdfcraft_engine::FontFamily::Courier => pdfcraft_engine::form_rich::Family::Courier,
+        })),
+        Some(FontChoice::Face(name)) => Some(FontPick::Named(name)),
+        _ => None,
+    };
+    if let Some(pick) = pick {
+        draft.set_family(&selection, &pick);
+        changed = true;
+    }
+    // Justified text isn't drawn yet (it is drawn left): picking it changes nothing.
+    let align = match look.align {
+        pdfcraft_engine::TextAlign::Left => Some(pdfcraft_engine::form_rich::Align::Left),
+        pdfcraft_engine::TextAlign::Center => Some(pdfcraft_engine::form_rich::Align::Center),
+        pdfcraft_engine::TextAlign::Right => Some(pdfcraft_engine::form_rich::Align::Right),
+        pdfcraft_engine::TextAlign::Justify => None,
+    };
+    if let Some(align) = align.filter(|_| look.align != align_before) {
+        draft.set_align(&selection, align);
+        changed = true;
+    }
+    if changed {
+        fx.request_focus = true;
     }
 }
 
@@ -587,6 +711,13 @@ pub(crate) fn page_input(
 /// The edit the focused field's draft makes, if it differs from the field's value.
 pub(crate) fn draft_edit(focus: &Focus, form: &[FormField]) -> Option<Edit> {
     let f = focused_field(focus, form)?;
+    // A rich text field writes its formatting with its text (#11), when either changed; cleared, it
+    // is cleared as any text field is.
+    if let Some(draft) = &focus.rich {
+        let rich = draft.value();
+        let value = if rich.plain_text().trim().is_empty() { FieldValue::Text(String::new()) } else { FieldValue::Rich(rich) };
+        return draft.changed().then(|| Edit::SetFieldValue { name: f.name.clone(), value });
+    }
     let value = match f.kind {
         FormFieldKind::Text if f.value.first().map(String::as_str).unwrap_or("") != focus.text => FieldValue::Text(focus.text.clone()),
         // Typed into an editable combo box: a shown text picks its option, anything else is the
@@ -1151,6 +1282,18 @@ pub(crate) fn overlay(
     // tap's release comes with `PointerGone` (egui-winit sends one with every touch release, and
     // winit reports Windows pen input as touch), which clears `hover_pos`.
     let clicked_outside = || ctx.input(|i| i.pointer.any_click() && !i.pointer.interact_pos().is_some_and(|p| rect.contains(p)));
+    // A rich text field stays open when the click or the keyboard went outside the document (the
+    // Format text panel), as Edit text's paragraph does (#11), or to a pop-up over it: the panel's
+    // alignment, colour and size lists can open across the page (#13).
+    let editor_layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique(("form-editor", view.view_key())));
+    let over_page = |p: egui::Pos2| ctx.layer_id_at(p).is_some_and(|l| l.order >= egui::Order::Foreground && l != editor_layer);
+    let away = |p: egui::Pos2| !view.viewport_rect().contains(p) || over_page(p);
+    // Read before `away` is asked, which looks at the layers: never inside `ctx.input`, whose lock
+    // it would wait on.
+    let (pointer, pressed_at) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_pressed()));
+    let outside = pointer.is_some_and(away) || crate::edit_text_ui::focus_pos(ctx).is_some_and(away);
+    // A click on the page elsewhere while it waits without the keyboard closes it, as a click away would.
+    let page_click_elsewhere = pressed_at && pointer.is_some_and(|p| !away(p) && !rect.contains(p));
     let zoom = xf.zoom();
     let mut edit = None;
     let mut close = false;
@@ -1162,6 +1305,7 @@ pub(crate) fn overlay(
             // Over the page, so only where the document shows: a field scrolled under the mode bar
             // or a side panel must leave them their pointer (#2755). It stays on its field, cut off
             // as the page is, rather than pushed back into the window.
+            let mut want_format = false;
             egui::Area::new(egui::Id::unique(("form-editor", view.view_key())))
                 .fade_in(false)
                 .order(egui::Order::Foreground)
@@ -1188,6 +1332,13 @@ pub(crate) fn overlay(
                     // the box less 3 pt each side, scaled.
                     let wrap = (upright.width() - 6.0 * zoom).max(1.0);
                     let mut layouter = turned_layouter(font, multiline.then_some(wrap), password);
+                    // A rich text field shows its runs as they are formatted (#11); a turned one is
+                    // painted from its plain text, as before.
+                    let rich = fx.rich.clone().filter(|_| !turned);
+                    let mut rich_layouter = move |ui: &egui::Ui, text: &dyn egui::TextBuffer, _: f32| {
+                        let job = rich.as_ref().map(|d| d.job(text.as_str(), zoom, font, multiline.then_some(wrap))).unwrap_or_default();
+                        ui.fonts_mut(|f| f.layout_job(job))
+                    };
                     let mut te = if multiline { egui::TextEdit::multiline(&mut fx.text) } else { egui::TextEdit::singleline(&mut fx.text) };
                     te = te
                         .desired_width((upright.width() - 6.0 * zoom + 6.0).max(1.0))
@@ -1206,8 +1357,33 @@ pub(crate) fn overlay(
                     if turned {
                         // Laid out at the upright box's width, not the field's on screen.
                         te = te.layouter(&mut layouter);
+                    } else if fx.rich.is_some() {
+                        te = te.layouter(&mut rich_layouter);
                     }
                     let (r, laid_out) = show_field_editor(ui, te, rect, turned);
+                    if let Some(draft) = fx.rich.as_mut() {
+                        draft.sync(&fx.text);
+                        // The selection the Format text panel formats, kept while the panel has the keyboard.
+                        if r.has_focus()
+                            && let Some(range) = egui::TextEdit::load_state(ui.ctx(), r.id).and_then(|s| s.cursor.char_range())
+                        {
+                            let sorted = range.as_sorted_char_range();
+                            fx.selection = sorted.start.into()..sorted.end.into();
+                        }
+                        // ⌘B / ⌘I / ⌘U (Ctrl elsewhere) format the selection, or what is typed next,
+                        // and ⌘E asks for the Format text panel (#8). Taken here, so the app's own
+                        // shortcuts (New bookmark is ⌘B) don't see them while the field has the keys.
+                        if r.has_focus() {
+                            use super::rich_field::Toggle;
+                            let cmd = |key| ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
+                            for (key, what) in [(egui::Key::B, Toggle::Bold), (egui::Key::I, Toggle::Italic), (egui::Key::U, Toggle::Underline)] {
+                                if cmd(key) {
+                                    draft.toggle(&fx.selection, what);
+                                }
+                            }
+                            want_format |= cmd(egui::Key::E);
+                        }
+                    }
                     // The form field's own logical name; not a visual/preordered label.
                     let r = r.accessible_name(f.name.clone());
                     let caret_placed = settle_text_editor(ui, fx, &r, primary_down, laid_out.clone(), text_box.zip(before), frame);
@@ -1216,11 +1392,15 @@ pub(crate) fn overlay(
                     let (enter, esc, tab, shift) = ui.input(|i| {
                         (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::Tab), i.modifiers.shift)
                     });
+                    let rich = fx.rich.is_some();
                     if esc {
                         close = true;
                     } else if tab {
                         next = Some(!shift);
+                    } else if rich && !r.has_focus() && !lost && page_click_elsewhere {
+                        commit(view, form);
                     } else if lost
+                        && !(rich && outside)
                         && (!multiline || !enter)
                         && !fx.calendar_rect.is_some_and(|c| ui.input(|i| i.pointer.interact_pos().is_some_and(|p| c.contains(p))))
                     {
@@ -1233,6 +1413,9 @@ pub(crate) fn overlay(
                         }
                     }
                 });
+            if want_format {
+                view.forms.format_panel = true;
+            }
             // Date fields: a calendar under the field (Acrobat's date picker).
             if let pdfcraft_engine::form_scripts::Format::Date(fmt) = &f.actions.format
                 && let Some(picked) = calendar(ctx, view, rect, fmt, today)
@@ -1590,6 +1773,9 @@ mod tests {
             calendar_text: None,
             list: ChoiceList::default(),
             had_focus: false,
+            rich: None,
+            rich_loaded: false,
+            selection: 0..0,
         }
     }
 

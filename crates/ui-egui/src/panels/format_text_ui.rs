@@ -26,6 +26,8 @@ pub(crate) enum FontChoice {
     Resource(String),
     /// A standard family.
     Family(FontFamily),
+    /// A font family a rich text field's run can be set to (`Calibri`, `Carlito`), by name.
+    Face(String),
     /// Load font…: pick a font file.
     Load,
     /// A font file installed on this computer.
@@ -40,6 +42,9 @@ pub(crate) struct Fonts<'a> {
     /// The name the list shows for the current choice.
     pub shown: String,
     pub mixed_size: bool,
+    /// Families offered after the standard ones, by name: a rich text field's form fonts and
+    /// the craft-fonts families (#12). Empty elsewhere.
+    pub faces: &'a [String],
 }
 
 /// Text being typed in, for the alignment buttons: with some of it selected, they show and set the
@@ -166,8 +171,16 @@ pub(crate) fn panel(
                     ui.separator();
                 }
                 for f in [FontFamily::Helvetica, FontFamily::Times, FontFamily::Courier] {
-                    if ui.selectable_label(fonts.sources.is_none() && look.family == f, f.label()).clicked() {
+                    if ui.selectable_label(fonts.sources.is_none() && fonts.shown == f.label(), f.label()).clicked() {
                         out.font = Some(FontChoice::Family(f));
+                    }
+                }
+                if !fonts.faces.is_empty() {
+                    ui.separator();
+                    for face in fonts.faces {
+                        if ui.selectable_label(fonts.shown == *face, face).clicked() {
+                            out.font = Some(FontChoice::Face(face.clone()));
+                        }
                     }
                 }
                 if fonts.sources.is_some() {
@@ -656,7 +669,7 @@ mod typed_size_tests {
                     ready = true;
                     return;
                 }
-                let fonts = Fonts { sources: Some(&[]), shown: tl!("Mixed").into(), mixed_size: true };
+                let fonts = Fonts { sources: Some(&[]), shown: tl!("Mixed").into(), mixed_size: true, faces: &[] };
                 panel(ui, &Tokens::get(ui.ctx()), look, None, fonts, None);
             },
             AddedText::default(),

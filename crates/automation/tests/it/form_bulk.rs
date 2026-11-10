@@ -217,7 +217,9 @@ fn formatted_text_through_form_fill() {
     for (args, says) in [
         (json!({"alpha": [{"text": "x", "weight": 700}]}), "runs take text, bold"),
         (json!({"alpha": [{"text": "x", "size": 900}]}), "size must be 1 to 300"),
-        (json!({"alpha": [{"text": "x", "font": "comic"}]}), "helvetica, times or courier"),
+        (json!({"alpha": [{"text": "x", "align": "justify"}]}), "align must be left, center or right"),
+        (json!({"alpha": [{"text": "x", "align": "left"}, {"text": "y", "align": "right"}]}), "give a paragraph one align"),
+        (json!({"alpha": [{"text": "x", "font": "comic"}]}), "one of helvetica, times, courier"),
         (json!({"alpha": []}), "give 1 to"),
         (json!({"alpha": "plain"}), "array of runs"),
     ] {
@@ -226,5 +228,132 @@ fn formatted_text_through_form_fill() {
     }
     let err = a.call("form_fill", &json!({"doc": id, "values": {"alpha": "a"}, "rich": {"alpha": [{"text": "b"}]}})).unwrap_err();
     assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("both values and rich")), "{err:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Issue #13: `form_fill` `rich` aligns the paragraphs a run's text is in; a paragraph no run
+/// aligns has none of its own (it follows the field's), through save and reopen.
+#[test]
+fn paragraph_alignment_through_form_fill_rich() {
+    use pdfcraft_engine::form_rich::Align;
+    let (mut a, id, dir) = setup("rich-align");
+    let runs = json!([{"text": "Title", "bold": true, "align": "center"}, {"text": " here", "align": "center"}, {"text": "\nBody\nEnd", "align": "right"}, {"text": "\nLeft to the field"}]);
+    tool(&mut a, "form_fill", json!({"doc": id, "rich": {"alpha": runs}}));
+    tool(&mut a, "doc_save", json!({"doc": id, "path": "rich-align.pdf"}));
+    let reopened = tool(&mut a, "doc_open", json!({"path": "rich-align.pdf"}))["doc"].as_u64().unwrap();
+    let doc = a.session().get(pdfcraft_engine::DocId(reopened)).unwrap();
+    let rich = doc.field_rich_value("alpha").expect("a rich value");
+    let paragraphs: Vec<(String, Option<Align>)> =
+        rich.paragraphs.iter().map(|p| (p.spans.iter().map(|s| s.text.as_str()).collect(), p.align)).collect();
+    assert_eq!(
+        paragraphs,
+        [
+            ("Title here".to_string(), Some(Align::Center)),
+            ("Body".to_string(), Some(Align::Right)),
+            ("End".to_string(), Some(Align::Right)),
+            ("Left to the field".to_string(), None),
+        ]
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Issue #12: `form_fields` lists the families rich runs can use (`rich_fonts`), and a run in one
+/// of the craft-fonts families is drawn in that face, which the form then holds, through save and
+/// reopen. Without craft-fonts there are none to list, and the name is refused.
+#[test]
+fn a_craft_family_through_form_fill_rich() {
+    let (mut a, id, dir) = setup("rich-craft");
+    let listed = tool(&mut a, "form_fields", json!({"doc": id}))["rich_fonts"].clone();
+    let fill = json!({"doc": id, "rich": {"alpha": [{"text": "plain "}, {"text": "Sneak", "bold": true, "font": "carlito"}]}});
+    if !listed.as_array().unwrap().iter().any(|f| f == "Carlito") {
+        assert_eq!(listed, json!([]), "the fixture has standard fonts only");
+        let err = a.call("form_fill", &fill).unwrap_err();
+        assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("one of helvetica, times, courier")), "{err:?}");
+        std::fs::remove_dir_all(dir).ok();
+        return;
+    }
+    tool(&mut a, "form_fill", fill.clone());
+    tool(&mut a, "doc_save", json!({"doc": id, "path": "rich-craft.pdf"}));
+    let reopened = tool(&mut a, "doc_open", json!({"path": "rich-craft.pdf"}))["doc"].as_u64().unwrap();
+    let fields = tool(&mut a, "form_fields", json!({"doc": reopened}));
+    assert_eq!(fields["rich_fonts"].as_array().unwrap().iter().filter(|f| *f == "Carlito").count(), 1, "{fields}");
+    let s = a.session();
+    let doc = s.get(pdfcraft_engine::DocId(reopened)).unwrap();
+    let rich = doc.field_rich_value("alpha").expect("a rich value");
+    let runs: Vec<(String, Option<String>, bool)> =
+        rich.paragraphs.iter().flat_map(|p| &p.spans).map(|r| (r.text.clone(), r.style.face.map(|f| f.as_str().to_string()), r.style.bold)).collect();
+    assert_eq!(runs[1], ("Sneak".to_string(), Some("Carlito".to_string()), true), "{runs:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Issue #7: `form_set_props` takes the craft-fonts faces this build has by name; the field keeps
+/// the font through save and reopen. Without craft-fonts the name is refused, listing the fonts
+/// this build has.
+#[test]
+fn craft_field_fonts_through_form_set_props() {
+    let (mut a, id, dir) = setup("craft-font");
+    let carlito = FieldFont::all().into_iter().find(|f| f.key() == "carlito-bold");
+    let args = json!({"doc": id, "field": "alpha", "appearance": {"font": "carlito-bold"}});
+    let Some(carlito) = carlito else {
+        let err = a.call("form_set_props", &args).unwrap_err();
+        // The list after the name asked for offers only the standard fonts.
+        let offered = |m: &str| m.split_once('(').map(|(_, list)| list.to_string()).unwrap_or_default();
+        assert!(
+            matches!(&err, ToolError::InvalidArgs(m) if offered(m).contains("courier-bold-oblique") && !offered(m).contains("carlito")),
+            "{err:?}"
+        );
+        std::fs::remove_dir_all(dir).ok();
+        return;
+    };
+    call(&mut a, args);
+    tool(&mut a, "doc_save", json!({"doc": id, "path": "saved.pdf"}));
+    let reopened = tool(&mut a, "doc_open", json!({"path": "saved.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(a.session().get(DocId(reopened)).unwrap().field_look("alpha").unwrap().font, carlito);
+    assert_eq!(a.session().get(DocId(reopened)).unwrap().field_look("beta").unwrap().font, FieldFont::Times, "only the field asked");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Issue #14: filling a field whose form font the file doesn't embed (Calibri) draws it with its
+/// open twin, and says so: a warning in form_fill's result and a line in the repair log
+/// (doc_info). Without craft-fonts, no such note.
+#[test]
+fn a_twin_drawn_for_a_missing_form_font_is_said() {
+    let dir = std::env::temp_dir().join(format!("pdfcraft-form-bulk-twin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>",
+        "<< /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Calibri 6 0 R >> >> >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /DA (/Calibri 10 Tf 0 g) /Rect [50 700 350 720] /P 3 0 R >>",
+        "<< /Type /Font /Subtype /TrueType /BaseFont /Calibri /Encoding /WinAnsiEncoding >>",
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    std::fs::write(dir.join("calibri.pdf"), pdf).unwrap();
+    let mut a = Automation::new().with_root(&dir).unwrap();
+    let id = tool(&mut a, "doc_open", json!({"path": "calibri.pdf"}))["doc"].as_u64().unwrap();
+    let out = tool(&mut a, "form_fill", json!({"doc": id, "values": {"notes": "Sneak Attack"}}));
+    let warnings: Vec<String> =
+        out["warnings"].as_array().map(|w| w.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let repairs: Vec<String> =
+        tool(&mut a, "doc_info", json!({"doc": id}))["repairs"].as_array().unwrap().iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+    let said = |lines: &[String]| lines.iter().any(|w| w.contains("\"notes\"") && w.contains("Carlito for Calibri"));
+    if pdfcraft_engine::FieldFont::all().iter().any(|f| f.key() == "carlito") {
+        assert!(said(&warnings), "form_fill says so: {out}");
+        assert!(said(&repairs), "the repair log keeps it: {repairs:?}");
+    } else {
+        assert!(!said(&warnings) && !said(&repairs), "{out}");
+    }
     std::fs::remove_dir_all(dir).ok();
 }

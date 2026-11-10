@@ -2838,6 +2838,7 @@ fn frame_overlays(ui: &mut egui::Ui, view: &mut DocView, env: &PageEnv<'_>, prim
     if let Some(e) = crate::edit_text_ui::overlay(ui.ctx(), view, info) {
         view.pending_edit = Some(e);
     }
+    crate::forms_ui::load_rich(doc, view, form);
     let text_box = crate::forms_ui::text_box(doc, view, form);
     if let Some(e) = crate::forms_ui::overlay(ui.ctx(), view, info, form, primary_down, text_box.as_ref(), today) {
         view.pending_edit = Some(e);
@@ -3800,6 +3801,10 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
             crate::forms_ui::FormNotice::ReadOnly(name) => app.notify_fmt("{name} is read-only", &[("name", &name)]),
             crate::forms_ui::FormNotice::NoAction(name) => app.notify_fmt("{name} has no action", &[("name", &name)]),
         }
+    }
+    // ⌘E in a rich text field: the left panel shows Format text for it (#8).
+    if std::mem::take(&mut app.views[index].forms.format_panel) {
+        app.left_open = true;
     }
     if let Some((name, action)) = app.views[index].forms.button.take() {
         run_button(app, index, &name, action);

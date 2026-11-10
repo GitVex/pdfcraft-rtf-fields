@@ -109,6 +109,40 @@ pub fn fallback_pieces(line: &str) -> Result<Vec<Piece>, GlyphError> {
         .collect()
 }
 
+/// `line` as a form font's open twin draws it (#14): each character the twin has as a glyph of
+/// the twin face, Thai and fallback symbols as [`fallback_pieces`] draws them, and the rest
+/// (characters the twin lacks) left to the text's own font. Text that can't be split is left whole.
+pub fn twin_pieces(line: &str, twin: ShapedScript) -> Vec<Piece> {
+    let own = || vec![Piece::Latin(line.to_string())];
+    let Ok(pieces) = (if has_fallback(line) { fallback_pieces(line) } else { Ok(vec![Piece::Latin(line.to_string())]) }) else { return own() };
+    let mut out: Vec<Piece> = Vec::new();
+    let mut push = |p: Piece| match (out.last_mut(), p) {
+        (Some(Piece::Shaped(a)), Piece::Shaped(b)) => a.extend(b),
+        (Some(Piece::Latin(a)), Piece::Latin(b)) => a.push_str(&b),
+        (_, p) => out.push(p),
+    };
+    for piece in pieces {
+        match piece {
+            Piece::Latin(s) => {
+                for c in s.chars() {
+                    match crate::face_cluster(twin, c) {
+                        Some(cluster) => push(Piece::Shaped(vec![cluster])),
+                        None => push(Piece::Latin(c.to_string())),
+                    }
+                }
+            }
+            shaped => push(shaped),
+        }
+    }
+    out
+}
+
+/// The width of `text` at `size` as [`twin_pieces`] draws it, the characters the twin lacks
+/// measured by `latin`.
+pub fn twin_width(text: &str, size: f64, twin: ShapedScript, latin: impl Fn(&str, f64) -> f64) -> f64 {
+    pieces_width(&twin_pieces(text, twin), size, 0.0, latin)
+}
+
 /// The width of `text` at `size`, as [`fallback_pieces`] draws it: Thai shaped, fallback symbols
 /// at their own advance, the rest measured by `latin`. Text that can't be split is measured by
 /// `latin` as a whole (drawing then reports why).
@@ -306,9 +340,20 @@ impl ShapedFonts {
 /// appearance. Thai the face can't draw, and every line when a glyph can't be read, is left to the
 /// standard font, whose encoder writes `?` for it; [`first_undrawable`] reports that.
 pub fn appearance_lines(lines: &[String], fonts: &mut Dict) -> (Vec<Vec<Piece>>, ShapedFonts) {
+    appearance_lines_in(lines, fonts, None)
+}
+
+/// [`appearance_lines`], drawn with the open `twin` of the field's font when it has one (#14).
+pub fn appearance_lines_in(lines: &[String], fonts: &mut Dict, twin: Option<ShapedScript>) -> (Vec<Vec<Piece>>, ShapedFonts) {
     let plain = |l: &String| vec![Piece::Latin(l.clone())];
-    let pieces: Vec<Vec<Piece>> =
-        lines.iter().map(|l| if has_fallback(l) { fallback_pieces(l).unwrap_or_else(|_| plain(l)) } else { plain(l) }).collect();
+    let pieces: Vec<Vec<Piece>> = lines
+        .iter()
+        .map(|l| match twin {
+            Some(twin) => twin_pieces(l, twin),
+            None if has_fallback(l) => fallback_pieces(l).unwrap_or_else(|_| plain(l)),
+            None => plain(l),
+        })
+        .collect();
     match ShapedFonts::new(clusters(pieces.iter().map(Vec::as_slice)), shaped_glyph, &Dict::new(), fonts, "PCTh", &mut |o| o).map_err(|(e, _)| e) {
         Ok(shaped) => (pieces, shaped),
         Err(_) => (lines.iter().map(plain).collect(), ShapedFonts::default()),
@@ -425,6 +470,7 @@ fn type3_font(clusters: &[&ShapedCluster], outlines: &HashMap<(ShapedScript, u32
                 ShapedScript::Hebrew => "Hebrew",
                 ShapedScript::Thai => "Thai",
                 ShapedScript::Symbol(_) => "Symbols",
+                ShapedScript::Twin(_) => "Twin",
             },
             |f| f.family,
         ),

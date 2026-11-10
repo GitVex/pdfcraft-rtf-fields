@@ -2411,6 +2411,33 @@ fn a_multiline_rich_value_wraps_across_runs_and_aligns_paragraphs() {
     assert!(ap.contains("1 0 0 1 173.66 "), "right aligned: {ap}");
 }
 
+/// Issue #13: a paragraph's own alignment is written to `/RV` and read back; one without follows
+/// the field's `/Q` (right, here), in the saved file's appearance as when filled.
+#[test]
+fn a_written_paragraph_alignment_reads_back_and_one_without_follows_q() {
+    use crate::rich::{Align, Family, Paragraph, RichValue, Span, Style};
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 600.0, 250.0, 680.0], &NewField::Text { multiline: true }, Some("rich")).unwrap();
+    let f = field(&fields(&doc), "rich").clone();
+    doc.update_dict(f.obj, |d| {
+        d.set(b"DA".to_vec(), PdfString::literal(b"/Helv 12 Tf 0 g".to_vec()));
+        d.set(b"Q".to_vec(), Object::Int(2));
+    })
+    .unwrap();
+    let style = Style { family: Family::Helvetica, face: None, bold: false, italic: false, size: 12.0, color: [0.0; 3], underline: false };
+    let para = |text: &str, align| Paragraph { align, spans: vec![Span { text: text.into(), style }] };
+    let value = RichValue { paragraphs: vec![para("mid", Some(Align::Center)), para("right", None)] };
+    set_value(&mut doc, "rich", &FieldValue::Rich(value.clone())).unwrap();
+    let doc = reopen(&doc);
+    let f = field(&fields(&doc), "rich").clone();
+    let read = crate::appearance::field_rich_value(&doc, &f).unwrap();
+    assert_eq!(read.paragraphs.iter().map(|p| p.align).collect::<Vec<_>>(), [Some(Align::Center), None]);
+    // "mid" is 1611 units, 19.33 at 12 pt: centred in the 200 wide box at 90.33. "right" is 1945
+    // units, 23.34: right aligned by /Q, ending at the padding (200 - 3).
+    let xs = tm_xs(&ap(&doc, &f.widgets[0]));
+    assert!(xs.len() == 2 && (xs[0] - 90.33).abs() < 0.01 && (xs[1] - 173.66).abs() < 0.01, "{xs:?}");
+}
+
 /// Issue #3: text outside ASCII is written in WinAnsi bytes, as the plain value is.
 #[test]
 fn a_rich_value_writes_winansi_bytes() {
@@ -2636,8 +2663,10 @@ fn fields_sharing_a_name_all_take_formatted_text() {
     }
 }
 
-/// A one-field form whose `/DR` holds Calibri fonts named `fonts` (`/BaseFont` → width of every
-/// character, in thousandths, with `zero` left out at width 0 as a subset leaves unused glyphs),
+/// A one-field form whose `/DR` holds embedded Calibri fonts named `fonts` (`/BaseFont` → width
+/// of every character, in thousandths, with `zero` left out at width 0 as a subset leaves unused
+/// glyphs; each with a stand-in `/FontFile2`, as the form's own program: one the file doesn't
+/// embed is drawn with its open twin instead, #14),
 /// its `/DA` naming `/Calibri 8 Tf`, rich text `rv` for `value`, redrawn: the appearance's
 /// content, its font resources, and the `/DR` font objects by resource name.
 fn form_font_field(fonts: &[(&str, Option<char>)], rv: &str, value: &str) -> (String, Dict, Dict) {
@@ -2669,8 +2698,12 @@ fn form_font_field_in(fonts: &[(&str, Option<char>)], rv: &str, value: &str, rec
     let mut dr = String::new();
     for (base, zero) in fonts {
         let widths: Vec<String> = (32u8..=126).map(|c| if Some(char::from(c)) == *zero { "0".into() } else { "500".into() }).collect();
+        objs.push("<< /Length 4 >>\nstream\nfont\nendstream".into());
+        let program = objs.len();
+        objs.push(format!("<< /Type /FontDescriptor /FontName /{base} /Flags 32 /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 750 /Descent -250 /CapHeight 650 /StemV 80 /FontFile2 {program} 0 R >>"));
+        let descriptor = objs.len();
         objs.push(format!(
-            "<< /Type /Font /Subtype /TrueType /BaseFont /{base} /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 126 /Widths [{}] >>",
+            "<< /Type /Font /Subtype /TrueType /BaseFont /{base} /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 126 /Widths [{}] /FontDescriptor {descriptor} 0 R >>",
             widths.join(" ")
         ));
         dr.push_str(&format!("/{base} {} 0 R ", objs.len()));
@@ -2740,12 +2773,22 @@ fn a_no_break_space_keeps_the_run_in_the_form_font() {
 }
 
 /// Issue #9: a bold or italic run uses the form's font of that weight and posture when it has one;
-/// with only the regular face it keeps the weight in the standard font (Helvetica-Bold), not the
-/// family in regular Calibri.
+/// with only the regular face it keeps the weight: in Calibri's open twin when the build has the
+/// craft-fonts Latin faces (#14), else in the standard font (Helvetica-Bold), never in regular
+/// Calibri.
 #[test]
 fn a_bold_run_without_a_bold_form_font_keeps_its_weight() {
     let rv = "<body><p style=\"font-family:Calibri;font-size:8pt\">plain <b>bold</b> <i>slant</i> <b><i>both</i></b></p></body>";
-    let (ap, ..) = form_font_field(&[("Calibri", None)], rv, "plain bold slant both");
+    let (ap, res, _) = form_font_field(&[("Calibri", None)], rv, "plain bold slant both");
+    // With the craft-fonts Latin faces, Calibri's open twin keeps the family as well (#14): the
+    // styled runs are drawn as Carlito Bold, Italic and Bold Italic glyphs, the plain run in the
+    // form's own Calibri.
+    if pdfcraft_fonts::twin_for("Calibri", true, false).is_some() {
+        assert!(ap.contains("/Calibri 8 Tf") && ap.contains("(plain ) Tj"), "{ap}");
+        assert!(!ap.contains("(bold) Tj") && !ap.contains("/HeBo"), "bold is drawn with the twin: {ap}");
+        assert!(res.iter().any(|(k, _)| k.starts_with(b"PCSy")), "as Type 3 glyphs: {res:?}");
+        return;
+    }
     let font_before = |text: &str| {
         let at = ap.find(&format!("({text}) Tj")).unwrap_or_else(|| panic!("{text} in {ap}"));
         ap[..at].rsplit(" Tf").nth(1).and_then(|l| l.rsplit('/').next()).map(|f| f.split(' ').next().unwrap_or(f).to_string()).unwrap()
@@ -2757,6 +2800,214 @@ fn a_bold_run_without_a_bold_form_font_keeps_its_weight() {
     );
     let (ap, ..) = form_font_field(&[("ABCDEF+Calibri", None), ("ABCDEF+Calibri-BoldItalic", None)], rv, "plain bold slant both");
     assert!(ap.contains("/ABCDEF+Calibri-BoldItalic 8 Tf") && ap.contains("/HeBo 8 Tf"), "a subset's tag is not part of its name: {ap}");
+}
+
+/// The craft-fonts face with automation key `key`, as a field font, if this build has it.
+fn craft_font(key: &str) -> Option<FieldFont> {
+    FieldFont::all().into_iter().find(|f| matches!(f, FieldFont::Craft(_)) && f.key() == key)
+}
+
+/// Issue #7: a craft-fonts face chosen for a field is embedded whole in `/DR` as a simple
+/// TrueType font (`/FontFile2`, WinAnsi `/Widths`), named by `/DA`, drawn in the appearance and
+/// read back as itself; two fields that use it share one embedded program. Without craft-fonts
+/// only the standard fonts are offered.
+#[test]
+fn a_craft_font_is_embedded_once_and_round_trips_as_a_field_font() {
+    let Some(carlito) = craft_font("carlito-bold") else {
+        assert_eq!(FieldFont::all(), FieldFont::ALL.to_vec(), "no craft faces without craft-fonts");
+        return;
+    };
+    assert_eq!((carlito.label(), carlito.resource()), ("Carlito Bold", "Carlito-Bold"));
+    let mut doc = one_page();
+    for (name, y) in [("a", 700.0), ("b", 650.0)] {
+        add_field(&mut doc, 0, [50.0, y, 250.0, y + 20.0], &NewField::Text { multiline: false }, Some(name)).unwrap();
+        set_value(&mut doc, name, &FieldValue::Text("Ada".into())).unwrap();
+        let f = field(&fields(&doc), name).clone();
+        let new = Look { font: carlito, ..look(&doc, &f) };
+        set_props(&mut doc, name, &FieldProps { look: Some(new), font_size: Some(12.0), ..FieldProps::default() }).unwrap();
+    }
+    let doc = reopen(&doc);
+    for name in ["a", "b"] {
+        let f = field(&fields(&doc), name).clone();
+        assert_eq!(look(&doc, &f).font, carlito, "{name} reads back as Carlito Bold");
+        let a = ap(&doc, &f.widgets[0]);
+        assert!(a.contains("/Carlito-Bold 12 Tf") && a.contains("(Ada) Tj"), "{name}: {a}");
+    }
+    let root = doc.root().unwrap();
+    let af = doc.resolve(doc.get(root).as_dict().unwrap().get(b"AcroForm").unwrap());
+    let dr = doc.resolve(af.as_dict().unwrap().get(b"DR").unwrap());
+    let fonts = doc.resolve(dr.as_dict().unwrap().get(b"Font").unwrap());
+    let font = doc.resolve(fonts.as_dict().unwrap().get(b"Carlito-Bold").unwrap());
+    let font = font.as_dict().unwrap();
+    assert_eq!(
+        (font.name(b"Subtype"), font.name(b"Encoding"), font.name(b"BaseFont")),
+        (Some(&b"TrueType"[..]), Some(&b"WinAnsiEncoding"[..]), Some(&b"Carlito-Bold"[..]))
+    );
+    let widths = font.get(b"Widths").and_then(Object::as_array).unwrap();
+    assert_eq!(widths.len(), 224, "codes 32 to 255");
+    assert!(widths.get(usize::from(b'A' - 32)).and_then(Object::as_f64).is_some_and(|w| w > 0.0));
+    let descriptor = doc.resolve(font.get(b"FontDescriptor").unwrap());
+    let program = descriptor.as_dict().unwrap().reference(b"FontFile2").expect("the whole program is embedded");
+    let programs = doc
+        .object_numbers()
+        .into_iter()
+        .filter(|&n| matches!(&*doc.get(ObjRef::new(n, 0)), Object::Stream(s) if s.dict.contains(b"Length1")))
+        .count();
+    assert_eq!(programs, 1, "both fields share one embedded program ({program:?})");
+}
+
+/// Issue #7: a craft face this build doesn't have is refused, and the field is left as it was.
+#[test]
+fn an_unknown_craft_font_is_refused() {
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("a")).unwrap();
+    let f = field(&fields(&doc), "a").clone();
+    let before = f.da.clone();
+    let new = Look { font: FieldFont::Craft(u16::MAX), ..look(&doc, &f) };
+    let err = set_props(&mut doc, "a", &FieldProps { look: Some(new), ..FieldProps::default() }).unwrap_err().to_string();
+    assert!(err.contains("no such font"), "{err}");
+    assert_eq!(field(&fields(&doc), "a").da, before);
+}
+
+/// Issue #12: a run set to a craft-fonts family the form doesn't have is drawn in that face: its
+/// face in the run's weight is embedded in `/DR` on commit, as for a field set to it (#7), once
+/// however often it is used; the family is offered for runs from then on as the form's own.
+#[test]
+fn a_rich_run_in_a_craft_family_embeds_that_face() {
+    use crate::rich::{Face, Family, Paragraph, RichValue, Span, Style};
+    let mut doc = fixture();
+    let plain = Style { family: Family::Helvetica, face: None, bold: false, italic: false, size: 10.0, color: [0.0; 3], underline: false };
+    let carlito = Style { face: Face::named("Carlito"), bold: true, ..plain };
+    let value = |n: &str| {
+        let spans = vec![Span { text: "plain ".into(), style: plain }, Span { text: n.into(), style: carlito }];
+        FieldValue::Rich(RichValue { paragraphs: vec![Paragraph { align: None, spans }] })
+    };
+    set_value(&mut doc, "notes", &value("bold")).unwrap();
+    let Some(_) = craft_font("carlito-bold") else {
+        // Without craft-fonts there is nothing to embed: the run keeps its weight in Helvetica.
+        let f = field(&fields(&doc), "notes").clone();
+        assert!(ap(&doc, &f.widgets[0]).contains("/HeBo 10 Tf"));
+        assert!(crate::appearance::rich_families(&doc).is_empty());
+        return;
+    };
+    set_value(&mut doc, "notes", &value("again")).unwrap();
+    let doc = reopen(&doc);
+    let f = field(&fields(&doc), "notes").clone();
+    let a = ap(&doc, &f.widgets[0]);
+    assert!(a.contains("/Carlito-Bold 10 Tf") && a.contains("(again) Tj") && a.contains("/Helv 10 Tf"), "{a}");
+    let programs = doc
+        .object_numbers()
+        .into_iter()
+        .filter(|&n| matches!(&*doc.get(ObjRef::new(n, 0)), Object::Stream(s) if s.dict.contains(b"Length1")))
+        .count();
+    assert_eq!(programs, 1, "embedded once");
+    let read = crate::appearance::field_rich_value(&doc, &f).unwrap();
+    assert_eq!(read.paragraphs[0].spans[1].style.face.map(|f| f.as_str().to_string()).as_deref(), Some("Carlito"));
+    let families = crate::appearance::rich_families(&doc);
+    assert_eq!(families.iter().filter(|f| f.as_str() == "Carlito").count(), 1, "offered once: {families:?}");
+}
+
+/// Carlito's widths for WinAnsi codes 32–255, as a `/Widths` array: what a real Calibri has, since
+/// Carlito is made with Calibri's widths. `None` without the craft-fonts Latin faces.
+fn carlito_widths() -> Option<String> {
+    let face = pdfcraft_fonts::embedding::field_faces().iter().find(|f| f.font.family == "Carlito" && f.font.style == "Regular")?;
+    let mut scratch = Document::new_empty();
+    let font = pdfcraft_fonts::embedding::embed_win_ansi(&mut scratch, face.font.bytes).ok()?;
+    let font = scratch.resolve(&font);
+    let widths = font.as_dict()?.get(b"Widths")?.as_array()?.iter().filter_map(Object::as_f64).map(|w| format!("{w:.3}")).collect::<Vec<_>>();
+    Some(format!("[{}]", widths.join(" ")))
+}
+
+/// A one-field form whose `/DR` has Calibri (and Calibri-Bold) with `widths`, embedded or not (a
+/// `/FontFile2` in its descriptor), its `/DA` naming `/Calibri 10 Tf`, filled with `value` (rich
+/// text `rv` when given), redrawn: the document and the field's appearance stream.
+fn calibri_field(value: &str, rv: Option<&str>, embedded: bool, widths: &str, rect: [f64; 4]) -> (Document, pdfcraft_cos::Stream) {
+    let descriptor = if embedded { "/FontDescriptor 9 0 R" } else { "" };
+    let ff = if rv.is_some() { flags::RICH_TEXT | flags::MULTILINE } else { flags::MULTILINE };
+    let rv = rv.map_or(String::new(), |rv| format!("/RV {}", pdfcraft_fonts::literal(rv.as_bytes()).iter().map(|&b| b as char).collect::<String>()));
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>".into(),
+        "<< /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Calibri 6 0 R /Calibri-Bold 7 0 R >> >> >>".into(),
+        format!(
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /Ff {ff} /DA (/Calibri 10 Tf 0 g) /V {} {rv} /Rect [{} {} {} {}] /P 3 0 R /MK << >> /BS << /W 0 >> >>",
+            pdfcraft_fonts::literal(value.as_bytes()).iter().map(|&b| b as char).collect::<String>(),
+            rect[0],
+            rect[1],
+            rect[2],
+            rect[3]
+        ),
+        format!("<< /Type /Font /Subtype /TrueType /BaseFont /Calibri /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 255 /Widths {widths} {descriptor} >>"),
+        format!("<< /Type /Font /Subtype /TrueType /BaseFont /Calibri-Bold /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 255 /Widths {widths} {descriptor} >>"),
+        "<< /Length 4 >>\nstream\nfont\nendstream".into(), // 8: a stand-in program
+        "<< /Type /FontDescriptor /FontName /Calibri /Flags 32 /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 750 /Descent -250 /CapHeight 650 /StemV 80 /FontFile2 8 0 R >>".into(),
+    ];
+    let mut doc = document(&objs);
+    redraw_field(&mut doc, "notes").unwrap();
+    let w = field(&fields(&doc), "notes").widgets[0].obj;
+    let n = doc.get(w).as_dict().unwrap().get(b"AP").unwrap().as_dict().unwrap().reference(b"N").unwrap();
+    let Object::Stream(s) = doc.get(n).as_ref().clone() else { panic!() };
+    (doc, s)
+}
+
+/// Issue #14: a plain value in a form font the file doesn't embed (Calibri) is drawn with its open
+/// twin (Carlito) as Type 3 glyphs mapped back to the text, recorded on the appearance; the form's
+/// `/DA` and `/DR` are unchanged. An embedded Calibri is left alone.
+#[test]
+fn a_form_font_the_file_lacks_is_drawn_with_its_open_twin() {
+    let widths = carlito_widths().unwrap_or_else(|| format!("[{}]", vec!["500"; 224].join(" ")));
+    let (doc, ap) = calibri_field("Sneak Attack", None, false, &widths, [50.0, 600.0, 350.0, 680.0]);
+    let mark = ap.dict.get(crate::appearance::TWIN_MARK).and_then(Object::as_string).map(PdfString::to_text);
+    let fonts =
+        ap.dict.get(b"Resources").and_then(Object::as_dict).and_then(|r| r.get(b"Font")).and_then(Object::as_dict).cloned().unwrap_or_default();
+    let type3 = type3_fonts(&doc, &fonts);
+    if carlito_widths().is_none() {
+        assert_eq!((mark, type3.len()), (None, 0), "without craft-fonts nothing changes");
+        return;
+    }
+    assert_eq!(mark.as_deref(), Some("Calibri|Carlito"), "recorded on the appearance");
+    assert!(type3.iter().any(|(_, cmap)| cmap.contains("<0053>") && cmap.contains("<006B>")), "S and k mapped back: {type3:?}");
+    let f = field(&fields(&doc), "notes").clone();
+    assert_eq!(f.da, "/Calibri 10 Tf 0 g", "the field's /DA is unchanged");
+    let dr = doc.get(ObjRef::new(4, 0)).as_dict().unwrap().get(b"DR").cloned().unwrap();
+    assert_eq!(dr.as_dict().unwrap().get(b"Font").and_then(Object::as_dict).map(Dict::len), Some(2), "nothing added to /DR");
+    // Embedded, the form's own Calibri draws it.
+    let (_, ap) = calibri_field("Sneak Attack", None, true, &widths, [50.0, 600.0, 350.0, 680.0]);
+    assert!(ap.dict.get(crate::appearance::TWIN_MARK).is_none());
+    assert!(String::from_utf8_lossy(&ap.decoded().unwrap()).contains("(Sneak Attack) Tj"));
+}
+
+/// Issue #14: a rich value's runs in Calibri and Calibri-Bold, neither embedded, are drawn with
+/// Carlito and Carlito Bold, both recorded.
+#[test]
+fn rich_runs_in_form_fonts_the_file_lacks_use_their_twins() {
+    let Some(widths) = carlito_widths() else { return };
+    let rv = "<body><p style=\"font-family:Calibri;font-size:10pt\"><b>Sneak Attack</b> once per turn</p></body>";
+    let (_, ap) = calibri_field("Sneak Attack once per turn", Some(rv), false, &widths, [50.0, 600.0, 350.0, 680.0]);
+    let mark = ap.dict.get(crate::appearance::TWIN_MARK).and_then(Object::as_string).map(PdfString::to_text);
+    assert_eq!(mark.as_deref(), Some("Calibri-Bold|Carlito Bold; Calibri|Carlito"));
+}
+
+/// Issue #14: the twin has the form font's widths, so a paragraph wraps onto the same lines drawn
+/// with Carlito as measured with Calibri's own widths (here: Carlito's, as Calibri's are).
+#[test]
+fn a_twin_wraps_text_onto_the_same_lines() {
+    let Some(widths) = carlito_widths() else { return };
+    let text = "Once per turn, you can deal an extra 2d6 damage to one creature you hit with an attack with a finesse or ranged weapon.";
+    let baselines = |embedded: bool| {
+        let (_, ap) = calibri_field(text, None, embedded, &widths, [50.0, 500.0, 170.0, 680.0]);
+        let mut ys: Vec<String> = String::from_utf8_lossy(&ap.decoded().unwrap())
+            .lines()
+            // The baseline is the number just before `Tm` (a line may start with a `Tf`).
+            .filter_map(|l| l.split(" Tm").next().filter(|_| l.contains(" Tm")).and_then(|tm| tm.split(' ').next_back().map(str::to_string)))
+            .collect();
+        ys.dedup();
+        ys
+    };
+    let (twin, own) = (baselines(false), baselines(true));
+    assert!(own.len() >= 4, "it wraps: {own:?}");
+    assert_eq!(twin, own, "the same lines with the twin as with the form font");
 }
 
 /// Issue #1: a `/DA` that already names a bold or italic standard font, by resource or base font

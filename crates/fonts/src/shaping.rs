@@ -30,7 +30,13 @@ pub enum ShapedScript {
     Thai,
     /// The `n`th symbol face ([`crate::symbol_fonts`]): one glyph per character, not shaped.
     Symbol(u8),
+    /// The `n`th craft-fonts Latin face ([`crate::embedding::field_faces`]) standing in for a font
+    /// a form names but doesn't embed (#14): one glyph per character, not shaped.
+    Twin(u8),
 }
+
+/// How many Latin faces can stand in as twins (the Latin manifest has fewer).
+const TWIN_FACES: usize = 64;
 
 /// How many symbol faces are looked in, in manifest order.
 const SYMBOL_FACES: u8 = 4;
@@ -42,6 +48,7 @@ impl ShapedScript {
             Self::Hebrew => crate::document_hebrew_font(false),
             Self::Thai => crate::document_thai_font(),
             Self::Symbol(n) => crate::symbol_fonts().get(usize::from(n)).copied(),
+            Self::Twin(n) => crate::embedding::field_faces().get(usize::from(n)).map(|f| f.font),
         }
     }
 }
@@ -56,6 +63,10 @@ fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)>
         ShapedScript::Hebrew => &HEBREW,
         ShapedScript::Thai => &THAI,
         ShapedScript::Symbol(n) => SYMBOL.get(usize::from(n))?,
+        ShapedScript::Twin(n) => {
+            static TWIN: [OnceLock<Option<(FontRef<'static>, ShaperData)>>; TWIN_FACES] = [const { OnceLock::new() }; TWIN_FACES];
+            TWIN.get(usize::from(n))?
+        }
     };
     cache
         .get_or_init(|| {
@@ -98,12 +109,54 @@ pub fn symbol_face_for(c: char) -> Option<ShapedScript> {
 /// `c` as one cluster in the symbol face that has it: its glyph at the pen and its own advance
 /// (em). Symbols need no shaping: one character, one glyph.
 pub fn symbol_cluster(c: char) -> Option<ShapedCluster> {
-    let script = symbol_face_for(c)?;
+    face_cluster(symbol_face_for(c)?, c)
+}
+
+/// `c` as one cluster of the face `script` names (a symbol face or a twin), unshaped: its glyph
+/// at the pen and its own advance (em). `None` when the face has no glyph for it.
+pub fn face_cluster(script: ShapedScript, c: char) -> Option<ShapedCluster> {
     let (font, _) = face(script)?;
     let id = font.charmap().map(c)?;
     let upem = f64::from(font.head().ok()?.units_per_em().max(1));
     let advance = f64::from(font.glyph_metrics(Size::unscaled(), LocationRef::default()).advance_width(id)?) / upem;
     Some(ShapedCluster { script, glyphs: vec![(id.to_u32(), [0.0, 0.0])], advance, text: c.to_string() })
+}
+
+/// The open twin standing in for a font named `base_font` (a `/BaseFont` such as `Calibri`,
+/// `ABCDEF+Calibri-Bold` or `TimesNewRomanPS-BoldMT`) in the given weight and posture: a
+/// craft-fonts Latin face with the same widths (#14). Calibri is drawn with Carlito, Cambria with
+/// Caladea, Arial, Times New Roman and Courier New with Liberation Sans, Serif and Mono. `None`
+/// for other fonts, and without the craft-fonts Latin faces.
+pub fn twin_for(base_font: &str, bold: bool, italic: bool) -> Option<ShapedScript> {
+    let name = base_font.split_once('+').filter(|(tag, _)| tag.len() == 6).map_or(base_font, |(_, rest)| rest);
+    let family = name.split(['-', ',']).next().unwrap_or(name);
+    let key: String = family.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+    let key = key.strip_suffix("mt").unwrap_or(&key);
+    let key = key.strip_suffix("ps").unwrap_or(key);
+    let twin = match key {
+        "calibri" => "Carlito",
+        "cambria" => "Caladea",
+        "arial" => "Liberation Sans",
+        "timesnewroman" => "Liberation Serif",
+        "couriernew" => "Liberation Mono",
+        _ => return None,
+    };
+    let style = match (bold, italic) {
+        (false, false) => "Regular",
+        (true, false) => "Bold",
+        (false, true) => "Italic",
+        (true, true) => "Bold Italic",
+    };
+    let n = crate::embedding::field_faces().iter().position(|f| f.font.family == twin && f.font.style == style)?;
+    u8::try_from(n).ok().filter(|n| usize::from(*n) < TWIN_FACES).map(ShapedScript::Twin)
+}
+
+/// The face's own name for a twin, as notes name it (`Carlito Bold`).
+pub fn twin_label(script: ShapedScript) -> Option<&'static str> {
+    match script {
+        ShapedScript::Twin(n) => crate::embedding::field_faces().get(usize::from(n)).map(|f| f.label.as_str()),
+        _ => None,
+    }
 }
 
 pub fn thai_has(c: char) -> bool {
@@ -127,12 +180,12 @@ fn shape_script(text: &str, rtl: bool, kind: ShapedScript) -> Result<Vec<ShapedC
         ShapedScript::Arabic => script::ARABIC,
         ShapedScript::Hebrew => script::HEBREW,
         ShapedScript::Thai => script::THAI,
-        ShapedScript::Symbol(_) => script::COMMON,
+        ShapedScript::Symbol(_) | ShapedScript::Twin(_) => script::COMMON,
     });
     // Preserve the historical Arabic per-character mapping; Hebrew and Thai marks stay with their base.
     buffer.set_cluster_level(match kind {
         ShapedScript::Arabic => BufferClusterLevel::Characters,
-        ShapedScript::Hebrew | ShapedScript::Thai | ShapedScript::Symbol(_) => BufferClusterLevel::MonotoneGraphemes,
+        ShapedScript::Hebrew | ShapedScript::Thai | ShapedScript::Symbol(_) | ShapedScript::Twin(_) => BufferClusterLevel::MonotoneGraphemes,
     });
     let shaped = shaper.shape(buffer, ShapeOptions::new());
     // Clusters are byte offsets into `text`; a cluster shows the characters up to the next one.

@@ -11,6 +11,39 @@ use skrifa::{
     raw::TableProvider,
 };
 
+/// A craft-fonts Latin face a form field can use (#7), with the names it goes by.
+pub struct FieldFace {
+    pub font: &'static crate::CraftFont,
+    /// Its PostScript name, from the program: the `/BaseFont` and the `/DR` resource name.
+    pub postscript: String,
+    /// The name automation tools take: family and style in lower case, hyphenated (`carlito-bold`;
+    /// a regular face is the family alone, `liberation-sans`).
+    pub key: String,
+    /// The name shown in menus: `Carlito Bold`, `Liberation Sans`.
+    pub label: String,
+}
+
+/// The craft-fonts Latin faces form fields can use, in manifest order: those that pass the checks
+/// embedding applies ([`validate`], [`validate_document_input`]) and have TrueType outlines.
+/// Worked out once; empty without craft-fonts.
+pub fn field_faces() -> &'static [FieldFace] {
+    static FACES: std::sync::OnceLock<Vec<FieldFace>> = std::sync::OnceLock::new();
+    FACES.get_or_init(|| {
+        crate::field_fonts()
+            .iter()
+            .filter(|f| validate_document_input(f.bytes).is_ok() && FontRef::new(f.bytes).is_ok_and(|r| r.glyf().is_ok()))
+            .filter_map(|font| {
+                let (_, postscript) = names(font.bytes).ok()?;
+                let postscript: String = postscript.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect();
+                let regular = font.style.eq_ignore_ascii_case("Regular");
+                let label = if regular { font.family.to_string() } else { format!("{} {}", font.family, font.style) };
+                let key = label.to_ascii_lowercase().split_whitespace().collect::<Vec<_>>().join("-");
+                Some(FieldFace { font, postscript, key, label })
+            })
+            .collect()
+    })
+}
+
 /// Compare PDF subset/PostScript names with the full face's family name.
 pub fn face_key(name: &str) -> String {
     name.rsplit('+').next().unwrap_or(name).chars().filter(char::is_ascii_alphanumeric).flat_map(char::to_lowercase).collect()
@@ -241,6 +274,77 @@ pub fn embed_mapping(
     let resource = format!("PCFull{index}");
     fonts.set(resource.as_bytes().to_vec(), Object::Ref(doc.add(Object::Dict(top))));
     Ok(resource)
+}
+
+/// Embed the complete TrueType program in `bytes` as a simple font with `WinAnsiEncoding` (#7):
+/// one byte per character, `/Widths` for codes 32–255 and the whole program as `/FontFile2`, so a
+/// form field's `/DA` can name it and any viewer can draw what is typed later. The face must pass
+/// the same checks as any document font ([`validate`], [`validate_document_input`]) and have
+/// TrueType outlines. Returns the font dictionary's reference.
+pub fn embed_win_ansi(doc: &mut Document, bytes: &[u8]) -> Result<Object, String> {
+    validate(bytes)?;
+    validate_document_input(bytes)?;
+    let font = FontRef::new(bytes).map_err(|e| e.to_string())?;
+    if font.glyf().is_err() {
+        return Err("a form field font needs TrueType outlines".into());
+    }
+    let (family, postscript) = names(bytes)?;
+    let name = postscript.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect::<String>();
+    if name.is_empty() || name.len() > 128 {
+        return Err("the font's name is invalid".into());
+    }
+    let loc = LocationRef::default();
+    let m = font.metrics(Size::unscaled(), loc);
+    let scale = 1000.0 / f64::from(m.units_per_em);
+    let advances = font.glyph_metrics(Size::unscaled(), loc);
+    let charmap = font.charmap();
+    // Each code's character (Annex D), its glyph's advance; 0 for a code the face has no glyph for.
+    let widths: Vec<Object> = (32u8..=255)
+        .map(|code| {
+            let w = crate::encodings::WIN_ANSI
+                .get(usize::from(code))
+                .and_then(|&u| char::from_u32(u))
+                .filter(|_| code != 0x7f)
+                .and_then(|c| charmap.map(c))
+                .filter(|g| g.to_u32() != 0)
+                .and_then(|g| advances.advance_width(g))
+                .map_or(0.0, |w| f64::from(w) * scale);
+            Object::Real(if w.is_finite() { w.clamp(0.0, 16_000.0) } else { 0.0 })
+        })
+        .collect();
+    let italic = m.italic_angle != 0.0;
+    let fixed = font.post().is_ok_and(|p| p.is_fixed_pitch() != 0);
+    // Nonsymbolic (32), so viewers map codes through WinAnsiEncoding and the (3,1) cmap; italic
+    // (64) and fixed pitch (1) as the face is.
+    let flags = 32 | if italic { 64 } else { 0 } | if fixed { 1 } else { 0 };
+    let mut descriptor = Dict::new();
+    descriptor.set(b"Type".to_vec(), Object::name("FontDescriptor"));
+    descriptor.set(b"FontName".to_vec(), Object::name(&name));
+    descriptor.set(b"FontFamily".to_vec(), Object::String(PdfString::literal(family.as_bytes().to_vec())));
+    descriptor.set(b"Flags".to_vec(), Object::Int(flags));
+    descriptor.set(b"ItalicAngle".to_vec(), Object::Real(f64::from(m.italic_angle)));
+    descriptor.set(b"Ascent".to_vec(), Object::Real(f64::from(m.ascent) * scale));
+    descriptor.set(b"Descent".to_vec(), Object::Real(f64::from(m.descent) * scale));
+    descriptor.set(b"CapHeight".to_vec(), Object::Real(f64::from(m.cap_height.unwrap_or(m.ascent)) * scale));
+    descriptor.set(b"StemV".to_vec(), Object::Int(80));
+    let bounds = m.bounds.ok_or("font has no outline bounds")?;
+    descriptor.set(
+        b"FontBBox".to_vec(),
+        Object::Array([bounds.x_min, bounds.y_min, bounds.x_max, bounds.y_max].map(|v| Object::Real(f64::from(v) * scale)).to_vec()),
+    );
+    let mut program = Dict::new();
+    program.set(b"Length1".to_vec(), Object::Int(i64::try_from(bytes.len()).map_err(|_| "font too large")?));
+    descriptor.set(b"FontFile2".to_vec(), Object::Ref(doc.add(Object::Stream(Stream::flate(program, bytes)))));
+    let mut top = Dict::new();
+    top.set(b"Type".to_vec(), Object::name("Font"));
+    top.set(b"Subtype".to_vec(), Object::name("TrueType"));
+    top.set(b"BaseFont".to_vec(), Object::name(&name));
+    top.set(b"FirstChar".to_vec(), Object::Int(32));
+    top.set(b"LastChar".to_vec(), Object::Int(255));
+    top.set(b"Widths".to_vec(), Object::Array(widths));
+    top.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+    top.set(b"FontDescriptor".to_vec(), Object::Ref(doc.add(Object::Dict(descriptor))));
+    Ok(Object::Ref(doc.add(Object::Dict(top))))
 }
 
 /// Whether the stream `object` refers to decodes to `expected`.

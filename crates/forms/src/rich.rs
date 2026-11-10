@@ -25,6 +25,19 @@ pub enum Family {
 }
 
 impl Family {
+    /// The standard family drawn for the font family `name` where the form has no font for it:
+    /// Courier for a monospaced one, Times for a serif one, else Helvetica.
+    pub fn standing_in_for(name: &str) -> Family {
+        let name = name.to_ascii_lowercase();
+        if name.contains("mono") || name.contains("courier") || name.contains("code") {
+            Family::Courier
+        } else if !name.contains("sans") && (name.contains("serif") || name.contains("times") || name.contains("roman")) {
+            Family::Times
+        } else {
+            Family::Helvetica
+        }
+    }
+
     /// The family a CSS `font-family` list names: the first entry recognised, else `None`.
     fn of_css(list: &str) -> Option<Family> {
         list.split(',').find_map(|name| {

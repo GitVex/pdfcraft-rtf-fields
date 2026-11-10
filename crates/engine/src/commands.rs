@@ -398,7 +398,8 @@ pub const COMMANDS: &[CommandSpec] = &[
     c("protect.unlock", "Enter permissions password…", None, None, Unlock, "lock-open"),
     c("protect.properties", "Security properties…", FILE, None, Document, "shield-check"),
     c("page.organize", "Organize pages", PAGES, None, Document, "layout-grid"),
-    c("bookmark.add", "New bookmark", PAGES, Some(Shortcut::cmd("B")), Assembly, "bookmark-plus"),
+    // Left to text fields while one has focus: ⌘B there is Bold in a rich text field (#8).
+    ct("bookmark.add", "New bookmark", PAGES, Some(Shortcut::cmd("B")), Assembly, "bookmark-plus"),
     c("bookmark.from_structure", "New bookmarks from structure", PAGES, None, Assembly, "list"),
     // Bookmarks from the lines set in chosen text styles, for headings that aren't tagged (#1693).
     c("bookmark.from_text_styles", "New bookmarks from text styles…", PAGES, None, Assembly, "list"),

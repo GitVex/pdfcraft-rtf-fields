@@ -1628,6 +1628,16 @@ fn dialog_shortcuts(ui: &mut egui::Ui) -> bool {
         (named("H / Space (hold)"), tl!("Hand (H)").to_string()),
         (crate::i18n::key_name("Delete").to_string(), tl!("Delete selected pages (Organize)").to_string()),
         (key(SELECT_ALL), tl!("Select all pages (Organize)").to_string()),
+        (
+            format!(
+                "{} / {} / {}",
+                key(pdfcraft_engine::commands::Shortcut::cmd("B")),
+                key(pdfcraft_engine::commands::Shortcut::cmd("I")),
+                key(pdfcraft_engine::commands::Shortcut::cmd("U"))
+            ),
+            tl!("Bold / italic / underline (rich text form field)").to_string(),
+        ),
+        (key(pdfcraft_engine::commands::Shortcut::cmd("E")), tl!("Format text (rich text form field)").to_string()),
     ] {
         rows.push((k, v));
     }
