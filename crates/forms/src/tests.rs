@@ -2438,6 +2438,66 @@ fn a_written_paragraph_alignment_reads_back_and_one_without_follows_q() {
     assert!(xs.len() == 2 && (xs[0] - 90.33).abs() < 0.01 && (xs[1] - 173.66).abs() < 0.01, "{xs:?}");
 }
 
+/// A text field 200 × `height` with an automatic size (`/Helv 0 Tf`) and the rich value `rv` for
+/// `value`: whether its value overflows, and its appearance.
+fn auto_rich_field(rv: &str, value: &str, multiline: bool, height: f64) -> (Option<appearance::Overflow>, String) {
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 600.0, 250.0, 600.0 + height], &NewField::Text { multiline }, Some("rich")).unwrap();
+    let f = field(&fields(&doc), "rich").clone();
+    let ff = flags::RICH_TEXT | if multiline { flags::MULTILINE } else { 0 };
+    doc.update_dict(f.obj, |d| {
+        d.set(b"Ff".to_vec(), Object::Int(i64::from(ff)));
+        d.set(b"DA".to_vec(), PdfString::literal(b"/Helv 0 Tf 0 g".to_vec()));
+        d.set(b"V".to_vec(), Object::String(PdfString::text(value)));
+        d.set(b"RV".to_vec(), Object::String(PdfString::text(rv)));
+    })
+    .unwrap();
+    redraw_field(&mut doc, "rich").unwrap();
+    let f = field(&fields(&doc), "rich").clone();
+    (appearance::value_overflow(&doc, &f, &f.widgets[0]), ap(&doc, &f.widgets[0]))
+}
+
+/// The sizes an appearance sets fonts at (`Tf`), in order.
+fn tf_sizes(ap: &str) -> Vec<f64> {
+    ap.split(" Tf").filter_map(|before| before.rsplit(' ').next()?.parse().ok()).collect()
+}
+
+/// Issue #22: an automatic size fits a single line as it is drawn: bold runs wider than the first
+/// run's font, and a run with its own size that doesn't shrink with the rest.
+#[test]
+fn an_automatic_size_fits_every_run_of_a_single_line() {
+    let bold = "illiterate fifty little lilies tilt";
+    let rv = format!("{XHTML}<p>a <b>{bold}</b></p></body>");
+    let (overflow, ap) = auto_rich_field(&rv, &format!("a {bold}"), false, 30.0);
+    assert_eq!(overflow, None, "{ap}");
+    let rv = format!("{XHTML}<p>small <span style=\"font-size:14pt\">FIXED</span> and the rest of a long line</p></body>");
+    let (overflow, ap) = auto_rich_field(&rv, "small FIXED and the rest of a long line", false, 30.0);
+    assert_eq!(overflow, None, "{ap}");
+    assert!(tf_sizes(&ap).contains(&14.0), "the fixed run keeps its size: {ap}");
+}
+
+/// Issue #22: an automatic size fits a multiline value as it wraps when drawn, its bold runs
+/// wrapping onto more lines than the first run's font would.
+#[test]
+fn an_automatic_size_fits_every_run_of_wrapped_lines() {
+    let bold = "illiterate fifty little lilies tilt; ".repeat(6);
+    let rv = format!("{XHTML}<p>a <b>{bold}</b></p></body>");
+    let (overflow, ap) = auto_rich_field(&rv, &format!("a {bold}"), true, 60.0);
+    assert_eq!(overflow, None, "{ap}");
+}
+
+/// Issue #22: a value in one font is sized exactly as before: as the plain value would be.
+#[test]
+fn an_automatic_size_in_one_font_is_unchanged() {
+    for (multiline, height) in [(false, 30.0), (true, 60.0)] {
+        let text = "the same size as a plain value of this length would take";
+        let (_, rich) = auto_rich_field(&format!("{XHTML}<p>{text}</p></body>"), text, multiline, height);
+        let expected = appearance::auto_text_size(text, 194.0, height - 6.0, multiline, pdfcraft_fonts::helvetica_width);
+        let got = tf_sizes(&rich);
+        assert!(got.iter().all(|s| (s - expected).abs() < 0.01), "{got:?} vs {expected}: {rich}");
+    }
+}
+
 /// Issue #3: text outside ASCII is written in WinAnsi bytes, as the plain value is.
 #[test]
 fn a_rich_value_writes_winansi_bytes() {
