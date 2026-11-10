@@ -1480,11 +1480,29 @@ fn rich_appearance(doc: &Document, rich: &RichValue, frame: &str, b: Box2, multi
         .collect();
     let inner_w = (b.width - 2.0 * b.pad).max(1.0);
     let inner_h = (b.height - 2.0 * b.pad).max(1.0);
-    // Runs without a size of their own (0, automatic) take one that fits the plain text in the
-    // first run's font, as the plain value would be sized.
-    let auto = match runs().find(|(s, _)| s.style.size == 0.0).and(runs().next()).and_then(|(_, f)| fonts.get(*f)) {
-        Some(first) => auto_text_size(&rich.plain_text(), inner_w, inner_h, multiline, |s, size| first.width(s, size)),
-        None => 12.0,
+    // Runs without a size of their own (0, automatic) take one size that fits the lines as they
+    // are drawn (#22): each run in its own font, a run with its own size at that size; a line as
+    // tall as its tallest run.
+    let auto = if runs().any(|(s, _)| s.style.size == 0.0) {
+        let lines_at = |size: f64, wrap: bool| {
+            let at = |s: &Style| if s.size > 0.0 { s.size } else { size };
+            rich_lines(rich, &fonts, &font_of, &at, inner_w, wrap)
+        };
+        let line_width = |size: f64| lines_at(size, false).iter().map(|l| l.width).fold(0.0, f64::max);
+        let size = auto_text_size_by(inner_w, inner_h, multiline, line_width, |size| lines_at(size, true).iter().map(|l| 1.15 * l.size).sum());
+        // `auto_text_size_by` shrinks a single line in proportion, as if all of it scaled. The
+        // runs with their own size don't: the line is `fixed + scaled × size` wide, so solve for
+        // the size that fills the width.
+        let fixed = line_width(0.0);
+        if multiline || !(fixed.is_finite() && fixed >= 0.0) || line_width(size) <= inner_w + 0.001 {
+            size
+        } else {
+            let tall = (inner_h.min(MAX_AUTO_HEIGHT) / 1.15).max(4.0);
+            let scaled = (line_width(tall) - fixed) / tall;
+            if scaled.is_finite() && scaled > 0.0 { ((inner_w - fixed) / scaled).clamp(4.0, tall) } else { size }
+        }
+    } else {
+        12.0
     };
     let size_of = |s: &Style| if s.size > 0.0 { s.size } else { auto };
     let lines = rich_lines(rich, &fonts, &font_of, &size_of, inner_w, multiline);
