@@ -2509,14 +2509,19 @@ fn a_pointer_resting_on_a_list_the_keys_scroll_keeps_the_highlight_on_the_keys()
 
 /// A form with one multiline rich text field, "notes", holding "Sneak Attack" with "Sneak" bold.
 fn rich_form() -> Vec<u8> {
-    let rv = "<body><p><b>Sneak</b> Attack</p></body>";
+    rich_form_with("<body><p><b>Sneak</b> Attack</p></body>", "Sneak Attack", "")
+}
+
+/// A one-page form whose text field "notes" has the rich value `rv` for `value`, with `extra`
+/// entries in its dictionary (`/Q 2`).
+fn rich_form_with(rv: &str, value: &str, extra: &str) -> Vec<u8> {
     let objs = [
         "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".to_string(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 300 400] >>".to_string(),
         "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>".to_string(),
         "<< /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Helv 6 0 R >> >> >>".to_string(),
         format!(
-            "<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /Ff {} /DA (/Helv 12 Tf 0 g) /V (Sneak Attack) /RV ({rv}) /Rect [20 300 280 360] /P 3 0 R >>",
+            "<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /Ff {} /DA (/Helv 12 Tf 0 g) /V ({value}) /RV ({rv}) /Rect [20 300 280 360] /P 3 0 R {extra}>>",
             pdfcraft_engine::field_flags::RICH_TEXT | pdfcraft_engine::field_flags::MULTILINE
         ),
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
@@ -2705,6 +2710,35 @@ fn a_font_from_format_text_applies_to_the_selection() {
     let runs = saved_runs(&h);
     let faces: Vec<(&str, Option<&str>)> = runs.iter().map(|(t, s)| (t.as_str(), s.face.as_ref().map(|f| f.as_str()))).collect();
     assert_eq!(faces, [("Sneak", None), (" ", None), ("Attack", Some("Carlito"))]);
+}
+
+/// Issue #13: Format text's alignment sets the paragraph the caret is in, and only that one: the
+/// next paragraph keeps following the field's own alignment (`/Q`), in the saved file.
+#[test]
+fn alignment_from_format_text_sets_the_carets_paragraph() {
+    use pdfcraft_engine::form_rich::Align;
+    let rv = "<body><p>First</p><p>Second</p></body>";
+    let mut h = harness_with_bytes("aligned.pdf", rich_form_with(rv, "First\\rSecond", "/Q 2 "));
+    click_field(&mut h, "notes", 0);
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.text.as_str()), Some("First\nSecond"));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Home);
+    h.run_steps(2);
+    let button = h.get_by_label("Alignment").rect().center();
+    click_at(&mut h, button);
+    h.run_steps(2);
+    // The button shows the paragraph's alignment: the field's own, right.
+    let centre = h.get_by_label("Centre").rect().center();
+    click_at(&mut h, centre);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_some(), "the field stays open");
+    commit(&mut h);
+    let s = h.state();
+    let bytes = s.session.save_bytes(s.views[0].id).unwrap();
+    let mut app = PdfCraftApp::new();
+    app.set_option("language", "en").unwrap();
+    app.open_bytes("saved.pdf", None, bytes.to_vec()).unwrap();
+    let rich = app.session.get(app.views[0].id).unwrap().field_rich_value("notes").expect("a rich value");
+    assert_eq!(rich.paragraphs.iter().map(|p| p.align).collect::<Vec<_>>(), [Some(Align::Center), None]);
 }
 
 /// How many top-level bookmarks the document has.

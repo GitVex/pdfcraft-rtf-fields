@@ -397,6 +397,11 @@ pub(crate) fn load_rich(doc: &pdfcraft_engine::Document, view: &mut DocView, for
     let base = pdfcraft_engine::form_rich::Style::of_da(&f.da);
     let mut draft = super::rich_field::RichDraft::open(doc.field_rich_value(&f.name).as_ref(), base, &fx.text);
     draft.fonts = doc.rich_font_families();
+    draft.quadding = match f.quadding {
+        1 => pdfcraft_engine::form_rich::Align::Center,
+        2 => pdfcraft_engine::form_rich::Align::Right,
+        _ => pdfcraft_engine::form_rich::Align::Left,
+    };
     fx.text = draft.editor_text().to_string();
     fx.rich = Some(draft);
 }
@@ -408,8 +413,9 @@ pub(crate) fn editing_rich(view: &DocView) -> bool {
 
 /// The Format text panel for the rich text field being edited: bold, italic and underline
 /// (#11), and size, colour and font family (#12), shown for its selection (a mixed selection as
-/// mixed), or for the text typed next at the caret, and applied to it. The editor then takes
-/// the keyboard back, keeping its selection.
+/// mixed), or for the text typed next at the caret, and applied to it; alignment (#13) for the
+/// paragraphs the selection or caret touches. The editor then takes the keyboard back, keeping
+/// its selection.
 pub(crate) fn format_panel(view: &mut DocView, ui: &mut egui::Ui, t: &crate::theme::Tokens) {
     use super::rich_field::{FontPick, Toggle, family_label};
     use crate::format_text_ui::FontChoice;
@@ -424,8 +430,14 @@ pub(crate) fn format_panel(view: &mut DocView, ui: &mut egui::Ui, t: &crate::the
         italic: draft.is_on(&selection, Toggle::Italic),
         size: f64::from_bits(size),
         color: color.map(f64::from_bits),
+        align: match draft.align(&selection) {
+            pdfcraft_engine::form_rich::Align::Left => pdfcraft_engine::TextAlign::Left,
+            pdfcraft_engine::form_rich::Align::Center => pdfcraft_engine::TextAlign::Center,
+            pdfcraft_engine::form_rich::Align::Right => pdfcraft_engine::TextAlign::Right,
+        },
         ..Default::default()
     };
+    let align_before = look.align;
     let mut extras = crate::edit_text_ui::Extras { underline: draft.is_on(&selection, Toggle::Underline), ..Default::default() };
     let before = (look.bold, look.italic, extras.underline, look.color);
     let shown = if mixed_family { tl!("Mixed").to_string() } else { family };
@@ -460,6 +472,17 @@ pub(crate) fn format_panel(view: &mut DocView, ui: &mut egui::Ui, t: &crate::the
     };
     if let Some(pick) = pick {
         draft.set_family(&selection, &pick);
+        changed = true;
+    }
+    // Justified text isn't drawn yet (it is drawn left): picking it changes nothing.
+    let align = match look.align {
+        pdfcraft_engine::TextAlign::Left => Some(pdfcraft_engine::form_rich::Align::Left),
+        pdfcraft_engine::TextAlign::Center => Some(pdfcraft_engine::form_rich::Align::Center),
+        pdfcraft_engine::TextAlign::Right => Some(pdfcraft_engine::form_rich::Align::Right),
+        pdfcraft_engine::TextAlign::Justify => None,
+    };
+    if let Some(align) = align.filter(|_| look.align != align_before) {
+        draft.set_align(&selection, align);
         changed = true;
     }
     if changed {

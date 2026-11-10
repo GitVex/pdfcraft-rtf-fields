@@ -75,6 +75,8 @@ pub struct RichDraft {
     /// The named font families the font list offers (#12): the form's fonts, then the
     /// craft-fonts families.
     pub fonts: Vec<String>,
+    /// The field's own alignment (`/Q`), which a paragraph without one follows (#13).
+    pub quadding: Align,
 }
 
 impl RichDraft {
@@ -87,8 +89,10 @@ impl RichDraft {
                 let mut looks = Vec::new();
                 for (i, p) in rich.paragraphs.iter().enumerate() {
                     if i > 0 {
-                        // The break takes the look of the paragraph it ends.
-                        looks.push(looks.last().copied().unwrap_or((base, p.align)));
+                        // The break takes the look of the paragraph it ends, and its alignment
+                        // (an empty paragraph's too, which has no character of its own).
+                        let ended = rich.paragraphs.get(i - 1).and_then(|p| p.align);
+                        looks.push((looks.last().map_or(base, |l: &Look| l.0), ended));
                         text.push('\n');
                     }
                     for span in &p.spans {
@@ -106,7 +110,7 @@ impl RichDraft {
                 (text, looks)
             }
         };
-        RichDraft { opened: (text.clone(), looks.clone()), looks, text, base, next: None, fonts: Vec::new() }
+        RichDraft { opened: (text.clone(), looks.clone()), looks, text, base, next: None, fonts: Vec::new(), quadding: Align::Left }
     }
 
     /// The editor's text: the field's plain text, a line per paragraph.
@@ -208,6 +212,48 @@ impl RichDraft {
         });
     }
 
+    /// The characters of the paragraphs `range` touches (the caret's, for an empty range), each
+    /// with the break that ends it.
+    fn paragraphs_of(&self, range: &std::ops::Range<usize>) -> std::ops::Range<usize> {
+        let chars: Vec<char> = self.text.chars().collect();
+        let first = range.start.min(chars.len());
+        let last = if range.is_empty() { first } else { range.end.saturating_sub(1).max(first) };
+        let start = chars.get(..first).and_then(|c| c.iter().rposition(|c| *c == '\n')).map_or(0, |i| i + 1);
+        let end = chars.get(last..).and_then(|c| c.iter().position(|c| *c == '\n')).map_or(chars.len(), |i| last + i + 1);
+        start..end.max(start)
+    }
+
+    /// The alignment the panel shows for `range`: the first paragraph it touches', else the
+    /// field's own.
+    pub fn align(&self, range: &std::ops::Range<usize>) -> Align {
+        let at = self.paragraphs_of(range);
+        let own = match self.looks.get(at.clone()).and_then(<[Look]>::first) {
+            Some(look) => look.1,
+            None => self.next.or_else(|| at.start.checked_sub(1).and_then(|i| self.looks.get(i).copied())).and_then(|l| l.1),
+        };
+        own.unwrap_or(self.quadding)
+    }
+
+    /// Align the paragraphs `range` touches (the caret's, for an empty range); one with nothing
+    /// in it yet keeps it for what is typed there.
+    pub fn set_align(&mut self, range: &std::ops::Range<usize>, align: Align) {
+        let at = self.paragraphs_of(range);
+        if at.is_empty() {
+            let mut look = self.caret_look(at.start);
+            look.1 = Some(align);
+            self.next = Some(look);
+            return;
+        }
+        let end = at.end.min(self.looks.len());
+        for (_, a) in self.looks.get_mut(at.start.min(end)..end).into_iter().flatten() {
+            *a = Some(align);
+        }
+        // What is typed next at the caret goes in this paragraph too.
+        if let Some(next) = self.next.as_mut().filter(|_| range.is_empty()) {
+            next.1 = Some(align);
+        }
+    }
+
     /// Change the styles of `range`, or the look of the text typed next at an empty range.
     fn restyle(&mut self, range: &std::ops::Range<usize>, change: impl Fn(&mut Style)) {
         if range.is_empty() {
@@ -230,20 +276,26 @@ impl RichDraft {
     /// The draft as the field's rich text value: a paragraph per line, a span per run of one
     /// style, each paragraph with the alignment of its first character.
     pub fn value(&self) -> RichValue {
-        let mut paragraphs = vec![Paragraph { align: None, spans: Vec::new() }];
+        let mut paragraphs: Vec<Paragraph> = Vec::new();
+        let mut fresh = true;
         for (c, (style, align)) in self.text.chars().zip(&self.looks) {
+            if fresh {
+                paragraphs.push(Paragraph { align: *align, spans: Vec::new() });
+                fresh = false;
+            }
             if c == '\n' {
-                paragraphs.push(Paragraph { align: None, spans: Vec::new() });
+                fresh = true;
                 continue;
             }
             let Some(p) = paragraphs.last_mut() else { continue };
-            if p.spans.is_empty() {
-                p.align = *align;
-            }
             match p.spans.last_mut() {
                 Some(last) if last.style == *style => last.text.push(c),
                 _ => p.spans.push(Span { text: c.to_string(), style: *style }),
             }
+        }
+        if fresh {
+            // After a last break, or with no text: an empty paragraph, aligned as set for it.
+            paragraphs.push(Paragraph { align: self.next.and_then(|l| l.1), spans: Vec::new() });
         }
         RichValue { paragraphs }
     }
@@ -386,6 +438,39 @@ mod tests {
             &Span { text: "X".into(), style: Style { family: Family::Courier, size: 18.0, ..BASE } },
             "0 pt is refused"
         );
+    }
+
+    fn paragraphs(parts: &[(&str, Option<Align>)]) -> RichValue {
+        RichValue {
+            paragraphs: parts
+                .iter()
+                .map(|(t, a)| Paragraph { align: *a, spans: if t.is_empty() { Vec::new() } else { vec![Span { text: (*t).into(), style: BASE }] } })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn alignment_applies_to_the_paragraphs_a_selection_or_caret_touches() {
+        let opened = paragraphs(&[("one", Some(Align::Right)), ("", Some(Align::Center)), ("three", None)]);
+        let mut d = RichDraft::open(Some(&opened), BASE, "");
+        d.quadding = Align::Right;
+        assert_eq!(d.editor_text(), "one\n\nthree");
+        assert_eq!(d.value(), opened, "an empty paragraph keeps its alignment");
+        assert!(!d.changed());
+        // The caret's paragraph, else the field's own (/Q) for one without.
+        assert_eq!((d.align(&(1..1)), d.align(&(4..4)), d.align(&(6..6))), (Align::Right, Align::Center, Align::Right));
+        // The caret alone aligns its paragraph.
+        d.set_align(&(7..7), Align::Left);
+        assert_eq!(d.value(), paragraphs(&[("one", Some(Align::Right)), ("", Some(Align::Center)), ("three", Some(Align::Left))]));
+        // A selection from the middle of one paragraph into the next aligns both, and no more.
+        d.set_align(&(2..5), Align::Center);
+        assert_eq!(d.value(), paragraphs(&[("one", Some(Align::Center)), ("", Some(Align::Center)), ("three", Some(Align::Left))]));
+        // A selection that ends at a paragraph's end doesn't reach the next one.
+        d.set_align(&(0..3), Align::Left);
+        assert_eq!(d.value().paragraphs.iter().map(|p| p.align).collect::<Vec<_>>(), [Some(Align::Left), Some(Align::Center), Some(Align::Left)]);
+        // A new paragraph typed at the end of one takes its alignment.
+        d.sync("one\nX\n\nthree");
+        assert_eq!(d.value().paragraphs[1], Paragraph { align: Some(Align::Left), spans: vec![Span { text: "X".into(), style: BASE }] });
     }
 
     #[test]

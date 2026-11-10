@@ -281,7 +281,7 @@ const MAX_RICH_CHARS: usize = 100_000;
 /// field's `/DA` (font, size, colour). A font is a standard family or one of `families` (the
 /// form's fonts and the craft-fonts families, by name).
 fn rich_for(f: &FormField, v: &Value, families: &[String]) -> Result<FieldValue> {
-    use pdfcraft_engine::form_rich::{Face, Family, Paragraph, RichValue, Span, Style};
+    use pdfcraft_engine::form_rich::{Align, Face, Family, Paragraph, RichValue, Span, Style};
     let wrong = |what: String| ToolError::InvalidArgs(format!("{}: {what}", f.name));
     if f.kind != FormFieldKind::Text {
         return Err(wrong(format!("formatted text is only for text fields, and this is a {}", kind_name(f.kind))));
@@ -296,9 +296,18 @@ fn rich_for(f: &FormField, v: &Value, families: &[String]) -> Result<FieldValue>
     for (i, run) in runs.iter().enumerate() {
         let n = i.saturating_add(1);
         let o = run.as_object().ok_or_else(|| wrong(format!("run {n} must be an object such as {{\"text\": \"…\", \"bold\": true}}")))?;
-        if let Some(k) = o.keys().find(|k| !["text", "bold", "italic", "underline", "size", "color", "font"].contains(&k.as_str())) {
-            return Err(wrong(format!("run {n} has {k:?}; runs take text, bold, italic, underline, size, color and font")));
+        if let Some(k) = o.keys().find(|k| !["text", "bold", "italic", "underline", "size", "color", "font", "align"].contains(&k.as_str())) {
+            return Err(wrong(format!("run {n} has {k:?}; runs take text, bold, italic, underline, size, color, font and align")));
         }
+        // The alignment of the paragraphs the run's text is in (#13); without one they follow
+        // the field's own.
+        let align = match o.get("align").map(|v| v.as_str()) {
+            None => None,
+            Some(Some("left")) => Some(Align::Left),
+            Some(Some("center")) => Some(Align::Center),
+            Some(Some("right")) => Some(Align::Right),
+            Some(_) => return Err(wrong(format!("run {n}: align must be left, center or right"))),
+        };
         let text = o.get("text").and_then(Value::as_str).ok_or_else(|| wrong(format!("run {n} needs text (a string)")))?;
         chars = chars.saturating_add(text.chars().count());
         if chars > MAX_RICH_CHARS {
@@ -347,6 +356,16 @@ fn rich_for(f: &FormField, v: &Value, families: &[String]) -> Result<FieldValue>
         for (j, part) in text.split('\n').enumerate() {
             if j > 0 {
                 paragraphs.push(Paragraph { align: None, spans: Vec::new() });
+            }
+            if let Some(align) = align
+                && let Some(p) = paragraphs.last_mut()
+            {
+                match p.align {
+                    Some(set) if set != align => {
+                        return Err(wrong(format!("run {n}: its paragraph is already aligned by an earlier run; give a paragraph one align")));
+                    }
+                    _ => p.align = Some(align),
+                }
             }
             let part = part.trim_end_matches('\r');
             if !part.is_empty()

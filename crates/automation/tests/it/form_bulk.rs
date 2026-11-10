@@ -217,6 +217,8 @@ fn formatted_text_through_form_fill() {
     for (args, says) in [
         (json!({"alpha": [{"text": "x", "weight": 700}]}), "runs take text, bold"),
         (json!({"alpha": [{"text": "x", "size": 900}]}), "size must be 1 to 300"),
+        (json!({"alpha": [{"text": "x", "align": "justify"}]}), "align must be left, center or right"),
+        (json!({"alpha": [{"text": "x", "align": "left"}, {"text": "y", "align": "right"}]}), "give a paragraph one align"),
         (json!({"alpha": [{"text": "x", "font": "comic"}]}), "one of helvetica, times, courier"),
         (json!({"alpha": []}), "give 1 to"),
         (json!({"alpha": "plain"}), "array of runs"),
@@ -226,6 +228,32 @@ fn formatted_text_through_form_fill() {
     }
     let err = a.call("form_fill", &json!({"doc": id, "values": {"alpha": "a"}, "rich": {"alpha": [{"text": "b"}]}})).unwrap_err();
     assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("both values and rich")), "{err:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Issue #13: `form_fill` `rich` aligns the paragraphs a run's text is in; a paragraph no run
+/// aligns has none of its own (it follows the field's), through save and reopen.
+#[test]
+fn paragraph_alignment_through_form_fill_rich() {
+    use pdfcraft_engine::form_rich::Align;
+    let (mut a, id, dir) = setup("rich-align");
+    let runs = json!([{"text": "Title", "bold": true, "align": "center"}, {"text": " here", "align": "center"}, {"text": "\nBody\nEnd", "align": "right"}, {"text": "\nLeft to the field"}]);
+    tool(&mut a, "form_fill", json!({"doc": id, "rich": {"alpha": runs}}));
+    tool(&mut a, "doc_save", json!({"doc": id, "path": "rich-align.pdf"}));
+    let reopened = tool(&mut a, "doc_open", json!({"path": "rich-align.pdf"}))["doc"].as_u64().unwrap();
+    let doc = a.session().get(pdfcraft_engine::DocId(reopened)).unwrap();
+    let rich = doc.field_rich_value("alpha").expect("a rich value");
+    let paragraphs: Vec<(String, Option<Align>)> =
+        rich.paragraphs.iter().map(|p| (p.spans.iter().map(|s| s.text.as_str()).collect(), p.align)).collect();
+    assert_eq!(
+        paragraphs,
+        [
+            ("Title here".to_string(), Some(Align::Center)),
+            ("Body".to_string(), Some(Align::Right)),
+            ("End".to_string(), Some(Align::Right)),
+            ("Left to the field".to_string(), None),
+        ]
+    );
     std::fs::remove_dir_all(dir).ok();
 }
 

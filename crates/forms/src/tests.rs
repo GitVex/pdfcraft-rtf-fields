@@ -2411,6 +2411,33 @@ fn a_multiline_rich_value_wraps_across_runs_and_aligns_paragraphs() {
     assert!(ap.contains("1 0 0 1 173.66 "), "right aligned: {ap}");
 }
 
+/// Issue #13: a paragraph's own alignment is written to `/RV` and read back; one without follows
+/// the field's `/Q` (right, here), in the saved file's appearance as when filled.
+#[test]
+fn a_written_paragraph_alignment_reads_back_and_one_without_follows_q() {
+    use crate::rich::{Align, Family, Paragraph, RichValue, Span, Style};
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 600.0, 250.0, 680.0], &NewField::Text { multiline: true }, Some("rich")).unwrap();
+    let f = field(&fields(&doc), "rich").clone();
+    doc.update_dict(f.obj, |d| {
+        d.set(b"DA".to_vec(), PdfString::literal(b"/Helv 12 Tf 0 g".to_vec()));
+        d.set(b"Q".to_vec(), Object::Int(2));
+    })
+    .unwrap();
+    let style = Style { family: Family::Helvetica, face: None, bold: false, italic: false, size: 12.0, color: [0.0; 3], underline: false };
+    let para = |text: &str, align| Paragraph { align, spans: vec![Span { text: text.into(), style }] };
+    let value = RichValue { paragraphs: vec![para("mid", Some(Align::Center)), para("right", None)] };
+    set_value(&mut doc, "rich", &FieldValue::Rich(value.clone())).unwrap();
+    let doc = reopen(&doc);
+    let f = field(&fields(&doc), "rich").clone();
+    let read = crate::appearance::field_rich_value(&doc, &f).unwrap();
+    assert_eq!(read.paragraphs.iter().map(|p| p.align).collect::<Vec<_>>(), [Some(Align::Center), None]);
+    // "mid" is 1611 units, 19.33 at 12 pt: centred in the 200 wide box at 90.33. "right" is 1945
+    // units, 23.34: right aligned by /Q, ending at the padding (200 - 3).
+    let xs = tm_xs(&ap(&doc, &f.widgets[0]));
+    assert!(xs.len() == 2 && (xs[0] - 90.33).abs() < 0.01 && (xs[1] - 173.66).abs() < 0.01, "{xs:?}");
+}
+
 /// Issue #3: text outside ASCII is written in WinAnsi bytes, as the plain value is.
 #[test]
 fn a_rich_value_writes_winansi_bytes() {
