@@ -2905,3 +2905,33 @@ fn ctrl_u_underlines_without_deleting() {
     let runs: Vec<(String, bool)> = saved_runs(&h).into_iter().map(|(t, s)| (t, s.underline)).collect();
     assert_eq!(runs.last(), Some(&("Attack".to_string(), true)), "{runs:?}");
 }
+
+/// Issues #31 and #32: a font from the list, then centring, both apply to a selection across two
+/// paragraphs, and the page draws them once committed: each line centred in the field's
+/// 260-point box, in Times.
+#[test]
+fn a_font_and_centring_on_two_paragraphs_are_drawn_after_commit() {
+    let rv = "<body><p>First</p><p>Second</p></body>";
+    let mut h = harness_with_bytes("aligned.pdf", rich_form_with(rv, "First\\rSecond", ""));
+    click_field(&mut h, "notes", 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    let list = h.get_by_label("Font").rect().center();
+    click_at(&mut h, list);
+    h.run_steps(2);
+    let times = h.get_by_label("Times").rect().center();
+    click_at(&mut h, times);
+    h.run_steps(2);
+    let button = h.get_by_label("Alignment").rect().center();
+    click_at(&mut h, button);
+    h.run_steps(2);
+    let centre = h.get_by_label("Centre").rect().center();
+    click_at(&mut h, centre);
+    h.run_steps(2);
+    commit(&mut h);
+    let ap = drawn_appearance(&h, "notes");
+    assert!(ap.contains("/TiRo 12 Tf") || ap.contains("/Times-Roman 12 Tf"), "in Times: {ap}");
+    let xs: Vec<f64> = ap.lines().filter_map(|l| l.strip_suffix(" Tm")).filter_map(|l| l.split(' ').nth(4)?.parse().ok()).collect();
+    assert_eq!(xs.len(), 2, "{ap}");
+    assert!(xs.iter().all(|x| *x > 100.0), "both lines centred, not at the left padding: {xs:?}");
+}
