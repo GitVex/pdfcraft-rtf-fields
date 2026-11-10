@@ -1382,7 +1382,7 @@ pub(crate) fn overlay(
                     // text box sees the keys: egui's own Ctrl+U deletes to the start of the line (#28).
                     let shortcuts = if fx.rich.is_some() && ui.memory(|m| m.has_focus(editor_id)) {
                         use super::rich_field::Toggle;
-                        let mut cmd = |key| ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
+                        let cmd = |key| ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
                         let toggles: Vec<Toggle> = [(egui::Key::B, Toggle::Bold), (egui::Key::I, Toggle::Italic), (egui::Key::U, Toggle::Underline)]
                             .into_iter()
                             .filter_map(|(key, what)| cmd(key).then_some(what))
