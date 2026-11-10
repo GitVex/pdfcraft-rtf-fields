@@ -1291,7 +1291,12 @@ pub(crate) fn overlay(
     // Read before `away` is asked, which looks at the layers: never inside `ctx.input`, whose lock
     // it would wait on.
     let (pointer, pressed_at) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_pressed()));
-    let outside = pointer.is_some_and(away) || crate::edit_text_ui::focus_pos(ctx).is_some_and(away);
+    // The keyboard counts only when something else has it (the panel's size box): the editor's own
+    // box can reach past the window for a long value, its centre off the page (#30).
+    let editor_id = egui::Id::unique(("form-field", view.pane.key, &f.name, focus.widget));
+    let keys_away =
+        ctx.memory(|m| m.focused()).filter(|id| *id != editor_id).and_then(|id| ctx.read_response(id)).is_some_and(|r| away(r.rect.center()));
+    let outside = pointer.is_some_and(away) || keys_away;
     // A click on the page elsewhere while it waits without the keyboard closes it, as a click away would.
     let page_click_elsewhere = pressed_at && pointer.is_some_and(|p| !away(p) && !rect.contains(p));
     let zoom = xf.zoom();

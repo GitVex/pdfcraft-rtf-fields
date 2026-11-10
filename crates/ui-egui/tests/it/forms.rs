@@ -2811,3 +2811,50 @@ fn command_e_in_a_rich_field_shows_format_text() {
     assert!(h.query_by_label("Bold").is_some(), "with Format text for the field");
     assert!(h.state().views[0].forms.focus.is_some(), "the field is still being edited");
 }
+
+/// The normal appearance stream of field `name`'s first widget, as the document draws it now.
+fn drawn_appearance(h: &Harness<'static, PdfCraftApp>, name: &str) -> String {
+    let s = h.state();
+    let bytes = s.session.save_bytes(s.views[0].id).unwrap();
+    let obj = s.session.get(s.views[0].id).unwrap().form.iter().find(|f| f.name == name).unwrap().widgets[0].obj;
+    let doc = pdfcraft_cos::Document::open(bytes).unwrap();
+    let w = doc.get(obj);
+    let ap = doc.resolve(w.as_dict().unwrap().get(b"AP").unwrap());
+    let n = doc.resolve(ap.as_dict().unwrap().get(b"N").unwrap());
+    let pdfcraft_cos::Object::Stream(st) = &*n else { panic!("{n:?}") };
+    String::from_utf8_lossy(&st.decoded().unwrap()).into_owned()
+}
+
+/// Issue #30: a rich text field with a long value, whose editor reaches past the window, commits
+/// on a click on the page like any other, and the page draws what was formatted. It stayed open:
+/// the editor's own box, centred off the page, counted as the keyboard being in the panel.
+#[test]
+fn a_long_rich_field_commits_on_a_page_click_and_draws_its_formatting() {
+    let paragraphs: Vec<String> = (1..=60).map(|n| format!("Line {n} of a long value")).collect();
+    let rv = format!("<body>{}</body>", paragraphs.iter().map(|p| format!("<p>{p}</p>")).collect::<String>());
+    let mut h = harness_with_bytes("long.pdf", rich_form_with(&rv, &paragraphs.join("\\r"), ""));
+    click_field(&mut h, "notes", 0);
+    assert!(h.state().views[0].forms.focus.as_ref().is_some_and(|f| f.rich.is_some()), "the editor opened, rich");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    let arrow = h.get_by_label("Font size").rect().center();
+    click_at(&mut h, arrow);
+    h.run_steps(2);
+    let preset = h.get_by_label("18 pt").rect().center();
+    click_at(&mut h, preset);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_some(), "the panel keeps the field open");
+    // Beside the field on the page, which the editor's box doesn't cover.
+    let beside = {
+        let s = h.state();
+        let doc = s.session.get(s.views[0].id).unwrap();
+        let f = doc.form.iter().find(|f| f.name == "notes").unwrap();
+        let r = pdfcraft_ui_egui::forms_ui::field_screen_rect(&s.views[0], &doc.info, f, 0).unwrap();
+        egui::pos2(r.max.x + 40.0, r.min.y - 40.0)
+    };
+    click_at(&mut h, beside);
+    h.run_steps(3);
+    assert!(h.state().views[0].forms.focus.is_none(), "committed");
+    let ap = drawn_appearance(&h, "notes");
+    assert!(ap.contains(" 18 Tf") && !ap.contains(" 12 Tf"), "drawn at 18 pt: {ap}");
+}
