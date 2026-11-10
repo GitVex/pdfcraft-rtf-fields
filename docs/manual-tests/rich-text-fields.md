@@ -13,8 +13,12 @@ running app.
   ```sh
   git clone https://github.com/storytold/craft-fonts ../craft-fonts
   git -C ../craft-fonts checkout <pinned revision>
-  CRAFT_FONTS_DIR=../craft-fonts cargo run --release -p pdfcraft -- form.pdf
+  CRAFT_FONTS_DIR="$(cd ../craft-fonts && pwd)" cargo run --release -p pdfcraft -- form.pdf
   ```
+
+  `CRAFT_FONTS_DIR` must be an absolute path: the build script runs in `crates/fonts`, so a
+  relative path is read from there. A build that can't find it prints
+  `building without craft-fonts` and goes on without the open fonts and symbol faces.
 
 - Use a form with rich text fields written by another app (Acrobat), in a font the file doesn't
   embed (Calibri), with several paragraphs and some bold runs, plus a few plain text fields. Use a
@@ -76,7 +80,7 @@ running app.
 
 ### Run 1 (2026-11-10)
 
-Build: a local build of `main` after #21 (the commit wasn't noted). Checks 12 to 24 weren't run.
+Build: a local build of `main` after #21 (the commit wasn't noted), with `CRAFT_FONTS_DIR=../craft-fonts`: a relative path, so most likely built without craft-fonts. Checks 12 to 24 weren't run.
 
 | # | Result | Notes |
 |---|--------|-------|
