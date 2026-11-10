@@ -42,10 +42,50 @@ impl Family {
     }
 }
 
+/// A font family name a run asks for that isn't a standard 14 one (`Calibri`, `Times New
+/// Roman`), kept so the form's own font of that name can draw it (#9). Copied with the style, so
+/// it is held inline: names longer than 63 bytes aren't kept, and such runs use [`Family`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Face {
+    len: u8,
+    bytes: [u8; 63],
+}
+
+impl Face {
+    /// The face a family name asks for: `None` for the standard and generic families, which
+    /// [`Family`] covers, and for names too long to keep.
+    pub fn named(name: &str) -> Option<Face> {
+        let name = name.trim().trim_matches(['"', '\'']).trim();
+        let plain: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let standard =
+            ["helvetica", "helv", "times", "timesroman", "tiro", "courier", "cour", "serif", "sansserif", "monospace", "zapfdingbats", "symbol"];
+        if name.is_empty() || name.len() > 63 || standard.contains(&plain.as_str()) {
+            return None;
+        }
+        let mut bytes = [0; 63];
+        bytes.get_mut(..name.len())?.copy_from_slice(name.as_bytes());
+        Some(Face { len: u8::try_from(name.len()).ok()?, bytes })
+    }
+
+    pub fn as_str(&self) -> &str {
+        // Built from a `&str` cut at its own length, so always UTF-8; empty if it somehow isn't.
+        std::str::from_utf8(self.bytes.get(..usize::from(self.len)).unwrap_or_default()).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for Face {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+
 /// A run's look.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Style {
+    /// The standard 14 family drawn when the form has no font for [`Self::face`].
     pub family: Family,
+    /// The font the run names, when it isn't a standard one.
+    pub face: Option<Face>,
     pub bold: bool,
     pub italic: bool,
     /// Points; 0 is automatic (fit to the field), as in a `/DA`.
@@ -82,7 +122,17 @@ impl Style {
                 lower.contains("italic") || lower.contains("oblique"),
             ),
         };
-        Style { family, bold, italic, size, color, underline: false }
+        // `Calibri`, `ABCDEF+Calibri-Bold`, `Arial,Bold`: the family, without subset tag and style.
+        let base = name.split_once('+').filter(|(tag, _)| tag.len() == 6).map_or(name, |(_, rest)| rest);
+        let face = Face::named(base.split(['-', ',']).next().unwrap_or(base));
+        Style { family, face, bold, italic, size, color, underline: false }
+    }
+
+    /// The style a `/DA` string sets (`/HeBo 12 Tf 1 0 0 rg`): its font's family, weight and
+    /// posture by name, its size (0 is automatic) and its colour.
+    pub fn of_da(da: &str) -> Style {
+        let parsed = crate::appearance::parse_da(da);
+        Style::of_font(&parsed.font, parsed.size, da_rgb(&parsed.color))
     }
 
     /// The standard-14 font this style is drawn in.
@@ -110,7 +160,10 @@ impl Style {
             let value = value.trim();
             match prop.trim().to_ascii_lowercase().as_str() {
                 "font" => self = self.with_font_shorthand(value),
-                "font-family" => self.family = Family::of_css(value).unwrap_or(self.family),
+                "font-family" => {
+                    self.family = Family::of_css(value).unwrap_or(self.family);
+                    self.face = Face::named(value.split(',').next().unwrap_or(value));
+                }
                 "font-weight" => self.bold = weight_is_bold(value).unwrap_or(self.bold),
                 "font-style" => self.italic = posture_is_italic(value).unwrap_or(self.italic),
                 "font-size" => self.size = css_size(value).unwrap_or(self.size),
@@ -129,6 +182,36 @@ impl Style {
         self
     }
 
+    /// This style as CSS declarations, every property written, so a run reads back the same
+    /// whatever the default style is. An automatic size (0) is left out.
+    fn css(&self) -> String {
+        let standard = match self.family {
+            Family::Helvetica => "Helvetica",
+            Family::Times => "Times",
+            Family::Courier => "Courier",
+        };
+        // The form's font first, then the standard family it falls back to.
+        let family = match self.face {
+            Some(face) => format!("'{}',{standard}", face.as_str().replace(['\'', '"', ';'], "")),
+            None => standard.to_string(),
+        };
+        let hex = |x: f64| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let [r, g, b] = self.color;
+        let mut css = format!(
+            "font-family:{family};font-weight:{};font-style:{};color:#{:02x}{:02x}{:02x};text-decoration:{}",
+            if self.bold { "bold" } else { "normal" },
+            if self.italic { "italic" } else { "normal" },
+            hex(r),
+            hex(g),
+            hex(b),
+            if self.underline { "underline" } else { "none" },
+        );
+        if self.size > 0.0 {
+            css.push_str(&format!(";font-size:{}pt", crate::appearance::fmt(self.size)));
+        }
+        css
+    }
+
     /// The CSS `font` shorthand: `[style] [weight] size[/line-height] family-list`, the form
     /// `/DS` strings use (`font: Helvetica 12pt` is read too, family first).
     fn with_font_shorthand(mut self, value: &str) -> Style {
@@ -144,10 +227,25 @@ impl Style {
                 family.push(token);
             }
         }
-        if let Some(f) = Family::of_css(&family.join(" ")) {
-            self.family = f;
+        if !family.is_empty() {
+            let list = family.join(" ");
+            if let Some(f) = Family::of_css(&list) {
+                self.family = f;
+            }
+            self.face = Face::named(list.split(',').next().unwrap_or(&list));
         }
         self
+    }
+}
+
+/// A `/DA` colour operation (`g`, `rg` or `k`) as RGB; black when it isn't one.
+pub(crate) fn da_rgb(color: &str) -> [f64; 3] {
+    let nums: Vec<f64> = color.split_whitespace().filter_map(|t| t.parse().ok()).filter(|x: &f64| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).collect();
+    match nums.as_slice() {
+        [g] => [*g; 3],
+        [r, g, b] => [*r, *g, *b],
+        [c, m, y, k] => [(1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k)],
+        _ => [0.0; 3],
     }
 }
 
@@ -244,6 +342,40 @@ impl RichValue {
         self.paragraphs.iter().map(|p| p.spans.iter().map(|s| s.text.replace('\n', "\r")).collect::<String>()).collect::<Vec<_>>().join("\r")
     }
 
+    /// This value as a `/RV` body (§12.7.4.3): a paragraph per paragraph, a `span` per run with
+    /// its whole style, and `br` for a line break, so it reads back as the same runs.
+    pub fn to_xhtml(&self) -> String {
+        let mut out = String::from(
+            "<?xml version=\"1.0\"?><body xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:xfa=\"http://www.xfa.org/schema/xfa-data/1.0/\" xfa:spec=\"2.1\">",
+        );
+        for p in &self.paragraphs {
+            match p.align {
+                Some(a) => {
+                    let a = match a {
+                        Align::Left => "left",
+                        Align::Center => "center",
+                        Align::Right => "right",
+                    };
+                    out.push_str(&format!("<p dir=\"ltr\" style=\"text-align:{a}\">"));
+                }
+                None => out.push_str("<p dir=\"ltr\">"),
+            }
+            for span in &p.spans {
+                out.push_str(&format!("<span style=\"{}\">", span.style.css()));
+                for (i, part) in span.text.split('\n').enumerate() {
+                    if i > 0 {
+                        out.push_str("<br/>");
+                    }
+                    out.push_str(&escape(part));
+                }
+                out.push_str("</span>");
+            }
+            out.push_str("</p>");
+        }
+        out.push_str("</body>");
+        out
+    }
+
     /// Whether this is the rich form of `value`: the same words in the same order, whatever the
     /// line breaks and runs of spaces between them. A `/RV` another app left behind after `/V`
     /// changed is not, and is not drawn.
@@ -334,6 +466,23 @@ impl Reader {
     }
 }
 
+/// Text as XML character data: `&`, `<` and `>` escaped (and `"`, for attribute values too).
+fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            // Characters XML 1.0 doesn't allow, even escaped: dropped rather than written.
+            c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn text_align(css: &str) -> Option<Align> {
     css.split(';').find_map(|decl| {
         let (prop, value) = decl.split_once(':')?;
@@ -351,7 +500,7 @@ fn text_align(css: &str) -> Option<Align> {
 mod tests {
     use super::*;
 
-    const BASE: Style = Style { family: Family::Helvetica, bold: false, italic: false, size: 12.0, color: [0.0; 3], underline: false };
+    const BASE: Style = Style { family: Family::Helvetica, face: None, bold: false, italic: false, size: 12.0, color: [0.0; 3], underline: false };
 
     fn spans(rich: &RichValue) -> Vec<(&str, bool, bool, f64)> {
         rich.paragraphs.iter().flat_map(|p| &p.spans).map(|s| (s.text.as_str(), s.style.bold, s.style.italic, s.style.size)).collect()
@@ -399,6 +548,52 @@ mod tests {
         assert_eq!(parse(&huge, None, BASE), None);
         let deep = format!("{}text{}", "<span>".repeat(5000), "</span>".repeat(5000));
         assert!(parse(&deep, None, BASE).is_none_or(|r| r.plain_text().len() <= 4), "deep nesting is bounded, not followed");
+    }
+
+    #[test]
+    fn a_written_value_reads_back_as_the_same_runs() {
+        let style = |bold, italic, size, color, underline| Style { family: Family::Times, face: None, bold, italic, size, color, underline };
+        let rich = RichValue {
+            paragraphs: vec![
+                Paragraph {
+                    align: None,
+                    spans: vec![
+                        Span { text: "Fish & <chips> \"now\"".into(), style: style(true, false, 12.0, [1.0, 0.0, 0.0], false) },
+                        Span { text: " then\nlater".into(), style: style(false, true, 0.0, [0.0, 0.0, 1.0], true) },
+                    ],
+                },
+                Paragraph {
+                    align: Some(Align::Right),
+                    spans: vec![Span { text: "Zürich".into(), style: style(false, false, 9.5, [0.0; 3], false) }],
+                },
+            ],
+        };
+        let xhtml = rich.to_xhtml();
+        // A run with an automatic size reads back automatic over a field whose size is (`0 Tf`).
+        assert_eq!(parse(&xhtml, None, Style { size: 0.0, ..BASE }), Some(rich.clone()), "{xhtml}");
+        assert_eq!(rich.plain_text(), "Fish & <chips> \"now\" then\rlater\rZürich");
+    }
+
+    #[test]
+    fn the_style_of_a_da_is_its_font_size_and_colour() {
+        let s = Style::of_da("/TiBI 9 Tf 0 0 1 rg");
+        assert_eq!((s.family, s.bold, s.italic, s.size, s.color), (Family::Times, true, true, 9.0, [0.0, 0.0, 1.0]));
+        assert_eq!(Style::of_da("/Helv 0 Tf 0 g").size, 0.0, "automatic");
+    }
+
+    #[test]
+    fn a_run_keeps_the_font_it_names_when_it_is_not_a_standard_one() {
+        let rv = "<body><p style=\"font-family:Calibri;font-size:8pt\">a<span style=\"font-family:'Times New Roman'\">b</span><span style=\"font-family:Courier\">c</span></p></body>";
+        let rich = parse(rv, Some("font: Calibri,sans-serif 8.0pt"), BASE).unwrap();
+        let faces: Vec<_> = rich.paragraphs[0].spans.iter().map(|s| (s.style.face.map(|f| f.as_str().to_string()), s.style.family)).collect();
+        assert_eq!(faces, [(Some("Calibri".into()), Family::Helvetica), (Some("Times New Roman".into()), Family::Times), (None, Family::Courier)],);
+        // The face and its standard fallback are both written, so both read back.
+        assert_eq!(parse(&rich.to_xhtml(), None, BASE), Some(rich));
+        let da = Style::of_da("/Calibri 8 Tf 0 g");
+        assert_eq!((da.face.map(|f| f.as_str().to_string()), da.family), (Some("Calibri".into()), Family::Helvetica));
+        assert_eq!(Style::of_font("ABCDEF+Calibri-Bold", 8.0, [0.0; 3]).face.map(|f| f.as_str().to_string()).as_deref(), Some("Calibri"));
+        assert_eq!(Style::of_font("Helvetica-Bold", 8.0, [0.0; 3]).face, None);
+        assert_eq!(Face::named(&"x".repeat(64)), None, "too long to keep");
     }
 
     #[test]

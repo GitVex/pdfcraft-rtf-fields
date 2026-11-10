@@ -192,3 +192,39 @@ fn bold_and_italic_field_fonts_through_form_set_props() {
     assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("times-bold-italic")), "{err:?}");
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Issue #4: form_fill writes formatted text to a text field through the same tool CLI and MCP
+/// use: the plain text is the value, the field becomes rich text (form_fields says so) and keeps
+/// it through save and reopen; arguments it can't use are refused with what it takes instead.
+#[test]
+fn formatted_text_through_form_fill() {
+    let (mut a, id, dir) = setup("rich");
+    let runs =
+        json!([{"text": "Sneak Attack", "bold": true}, {"text": "\nOnce per turn, "}, {"text": "2d6", "bold": true, "color": "red", "size": 9}]);
+    let out = tool(&mut a, "form_fill", json!({"doc": id, "rich": {"alpha": runs}}));
+    assert_eq!((out["filled"].as_u64(), out["undo"].as_str()), (Some(1), Some("Fill in alpha")), "{out}");
+    let field = |a: &mut Automation, name: &str| {
+        tool(a, "form_fields", json!({"doc": id}))["fields"].as_array().unwrap().iter().find(|f| f["name"] == name).cloned().unwrap()
+    };
+    let alpha = field(&mut a, "alpha");
+    assert_eq!((alpha["value"].as_str(), alpha["rich_text"].as_bool()), (Some("Sneak Attack\rOnce per turn, 2d6"), Some(true)), "{alpha}");
+    assert!(field(&mut a, "beta").get("rich_text").is_none(), "only the field written");
+    tool(&mut a, "doc_save", json!({"doc": id, "path": "rich.pdf"}));
+    let reopened = tool(&mut a, "doc_open", json!({"path": "rich.pdf"}))["doc"].as_u64().unwrap();
+    let alpha =
+        tool(&mut a, "form_fields", json!({"doc": reopened}))["fields"].as_array().unwrap().iter().find(|f| f["name"] == "alpha").cloned().unwrap();
+    assert_eq!(alpha["rich_text"].as_bool(), Some(true), "kept through save and reopen: {alpha}");
+    for (args, says) in [
+        (json!({"alpha": [{"text": "x", "weight": 700}]}), "runs take text, bold"),
+        (json!({"alpha": [{"text": "x", "size": 900}]}), "size must be 1 to 300"),
+        (json!({"alpha": [{"text": "x", "font": "comic"}]}), "helvetica, times or courier"),
+        (json!({"alpha": []}), "give 1 to"),
+        (json!({"alpha": "plain"}), "array of runs"),
+    ] {
+        let err = a.call("form_fill", &json!({"doc": id, "rich": args})).unwrap_err();
+        assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains(says)), "{args}: {err:?}");
+    }
+    let err = a.call("form_fill", &json!({"doc": id, "values": {"alpha": "a"}, "rich": {"alpha": [{"text": "b"}]}})).unwrap_err();
+    assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("both values and rich")), "{err:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
