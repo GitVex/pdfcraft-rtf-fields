@@ -2858,3 +2858,34 @@ fn a_long_rich_field_commits_on_a_page_click_and_draws_its_formatting() {
     let ap = drawn_appearance(&h, "notes");
     assert!(ap.contains(" 18 Tf") && !ap.contains(" 12 Tf"), "drawn at 18 pt: {ap}");
 }
+
+/// Issue #29: two changes in a row from Format text apply to the same selection: the panel gives
+/// the field editor back its selection, which egui collapses while the panel has the keyboard.
+#[test]
+fn two_changes_from_format_text_apply_to_the_same_selection() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    select_last(&mut h, 6);
+    // A font from the list: the list keeps the keyboard over several frames.
+    let list = h.get_by_label("Font").rect().center();
+    click_at(&mut h, list);
+    h.run_steps(2);
+    let times = h.get_by_label("Times").rect().center();
+    click_at(&mut h, times);
+    h.run_steps(2);
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.selection.clone()), Some(6..12), "still selected");
+    let swatch = h.get_by_label("Colour").rect().center();
+    click_at(&mut h, swatch);
+    h.run_steps(2);
+    let red = h.get_by_label("Red").rect().center();
+    click_at(&mut h, red);
+    h.run_steps(2);
+    commit(&mut h);
+    use pdfcraft_engine::form_rich::Family;
+    let runs: Vec<(String, Family, bool)> = saved_runs(&h).into_iter().map(|(t, s)| (t, s.family, s.color[0] > 0.5)).collect();
+    // Only "Attack" is in Times and red; "Sneak" and the space keep their look.
+    assert_eq!(
+        runs,
+        [("Sneak".to_string(), Family::Helvetica, false), (" ".to_string(), Family::Helvetica, false), ("Attack".to_string(), Family::Times, true)]
+    );
+}

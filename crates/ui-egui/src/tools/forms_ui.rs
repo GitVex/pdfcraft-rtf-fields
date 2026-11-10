@@ -62,6 +62,9 @@ pub struct Focus {
     /// The editor's selection (characters), as last seen while it had the keyboard: what the
     /// Format text panel formats.
     pub selection: std::ops::Range<usize>,
+    /// Put [`Self::selection`] back in the editor when it takes the keyboard back: egui collapses
+    /// a text box's selection while another widget (the Format text panel) has the keyboard (#29).
+    pub restore_selection: bool,
 }
 
 /// A drop-down's open list: the first item shown, the item the keys or the pointer are on, and
@@ -377,6 +380,7 @@ fn open_focus(f: &FormField, widget: usize) -> Focus {
         rich: None,
         rich_loaded: false,
         selection: 0..0,
+        restore_selection: false,
     }
 }
 
@@ -487,6 +491,7 @@ pub(crate) fn format_panel(view: &mut DocView, ui: &mut egui::Ui, t: &crate::the
     }
     if changed {
         fx.request_focus = true;
+        fx.restore_selection = true;
     }
 }
 
@@ -1156,6 +1161,14 @@ fn settle_text_editor(
     if fx.request_focus {
         r.request_focus();
         fx.request_focus = false;
+        if std::mem::take(&mut fx.restore_selection)
+            && let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), r.id)
+        {
+            let n = fx.text.chars().count();
+            let (start, end) = (fx.selection.start.min(n), fx.selection.end.min(n));
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(start), egui::text::CCursor::new(end))));
+            st.store(ui.ctx(), r.id);
+        }
         if std::mem::take(&mut fx.select_all)
             && let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), r.id)
         {
@@ -1781,6 +1794,7 @@ mod tests {
             rich: None,
             rich_loaded: false,
             selection: 0..0,
+            restore_selection: false,
         }
     }
 
