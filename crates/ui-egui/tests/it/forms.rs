@@ -2721,8 +2721,12 @@ fn alignment_from_format_text_sets_the_carets_paragraph() {
     let mut h = harness_with_bytes("aligned.pdf", rich_form_with(rv, "First\\rSecond", "/Q 2 "));
     click_field(&mut h, "notes", 0);
     assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.text.as_str()), Some("First\nSecond"));
-    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Home);
-    h.run_steps(2);
+    // Into the first paragraph.
+    for key in [egui::Key::End, egui::Key::ArrowUp] {
+        h.key_press(key);
+        h.run_steps(1);
+    }
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.selection.end <= 5), Some(true), "the caret is in \"First\"");
     let button = h.get_by_label("Alignment").rect().center();
     click_at(&mut h, button);
     h.run_steps(2);

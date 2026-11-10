@@ -1288,9 +1288,12 @@ pub(crate) fn overlay(
     let editor_layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique(("form-editor", view.view_key())));
     let over_page = |p: egui::Pos2| ctx.layer_id_at(p).is_some_and(|l| l.order >= egui::Order::Foreground && l != editor_layer);
     let away = |p: egui::Pos2| !view.viewport_rect().contains(p) || over_page(p);
-    let outside = ctx.input(|i| i.pointer.interact_pos()).is_some_and(away) || crate::edit_text_ui::focus_pos(ctx).is_some_and(away);
+    // Read before `away` is asked, which looks at the layers: never inside `ctx.input`, whose lock
+    // it would wait on.
+    let (pointer, pressed_at) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_pressed()));
+    let outside = pointer.is_some_and(away) || crate::edit_text_ui::focus_pos(ctx).is_some_and(away);
     // A click on the page elsewhere while it waits without the keyboard closes it, as a click away would.
-    let page_click_elsewhere = ctx.input(|i| i.pointer.primary_pressed() && i.pointer.interact_pos().is_some_and(|p| !away(p) && !rect.contains(p)));
+    let page_click_elsewhere = pressed_at && pointer.is_some_and(|p| !away(p) && !rect.contains(p));
     let zoom = xf.zoom();
     let mut edit = None;
     let mut close = false;
