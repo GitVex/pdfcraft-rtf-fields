@@ -357,7 +357,9 @@ fn rich_for(f: &FormField, v: &Value, families: &[String]) -> Result<FieldValue>
             if j > 0 {
                 paragraphs.push(Paragraph { align: None, spans: Vec::new() });
             }
-            if let Some(align) = align
+            let part = part.trim_end_matches('\r');
+            // The paragraphs the run puts text in, or starts: not the one a leading `\n` ends.
+            if let Some(align) = align.filter(|_| j > 0 || !part.is_empty())
                 && let Some(p) = paragraphs.last_mut()
             {
                 match p.align {
@@ -367,7 +369,6 @@ fn rich_for(f: &FormField, v: &Value, families: &[String]) -> Result<FieldValue>
                     _ => p.align = Some(align),
                 }
             }
-            let part = part.trim_end_matches('\r');
             if !part.is_empty()
                 && let Some(p) = paragraphs.last_mut()
             {

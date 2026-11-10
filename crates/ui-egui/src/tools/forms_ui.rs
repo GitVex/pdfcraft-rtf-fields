@@ -1283,8 +1283,11 @@ pub(crate) fn overlay(
     // winit reports Windows pen input as touch), which clears `hover_pos`.
     let clicked_outside = || ctx.input(|i| i.pointer.any_click() && !i.pointer.interact_pos().is_some_and(|p| rect.contains(p)));
     // A rich text field stays open when the click or the keyboard went outside the document (the
-    // Format text panel), as Edit text's paragraph does (#11).
-    let away = |p: egui::Pos2| !view.viewport_rect().contains(p);
+    // Format text panel), as Edit text's paragraph does (#11), or to a pop-up over it: the panel's
+    // alignment, colour and size lists can open across the page (#13).
+    let editor_layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique(("form-editor", view.view_key())));
+    let over_page = |p: egui::Pos2| ctx.layer_id_at(p).is_some_and(|l| l.order >= egui::Order::Foreground && l != editor_layer);
+    let away = |p: egui::Pos2| !view.viewport_rect().contains(p) || over_page(p);
     let outside = ctx.input(|i| i.pointer.interact_pos()).is_some_and(away) || crate::edit_text_ui::focus_pos(ctx).is_some_and(away);
     // A click on the page elsewhere while it waits without the keyboard closes it, as a click away would.
     let page_click_elsewhere = ctx.input(|i| i.pointer.primary_pressed() && i.pointer.interact_pos().is_some_and(|p| !away(p) && !rect.contains(p)));
