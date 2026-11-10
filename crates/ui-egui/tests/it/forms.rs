@@ -2889,3 +2889,19 @@ fn two_changes_from_format_text_apply_to_the_same_selection() {
         [("Sneak".to_string(), Family::Helvetica, false), (" ".to_string(), Family::Helvetica, false), ("Attack".to_string(), Family::Times, true)]
     );
 }
+
+/// Issue #28: Ctrl+U on Windows and Linux (Ctrl is the command key there) underlines a rich
+/// field's selection and deletes nothing: egui's own Ctrl+U deletes to the start of the line.
+#[test]
+fn ctrl_u_underlines_without_deleting() {
+    let ctrl = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    select_last(&mut h, 6);
+    h.key_press_modifiers(ctrl, egui::Key::U);
+    h.run_steps(2);
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.text.as_str()), Some("Sneak Attack"), "nothing deleted");
+    commit(&mut h);
+    let runs: Vec<(String, bool)> = saved_runs(&h).into_iter().map(|(t, s)| (t, s.underline)).collect();
+    assert_eq!(runs.last(), Some(&("Attack".to_string(), true)), "{runs:?}");
+}

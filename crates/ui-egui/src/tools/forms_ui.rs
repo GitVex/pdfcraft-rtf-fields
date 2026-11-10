@@ -1378,6 +1378,19 @@ pub(crate) fn overlay(
                     } else if fx.rich.is_some() {
                         te = te.layouter(&mut rich_layouter);
                     }
+                    // ⌘B / ⌘I / ⌘U / ⌘E (Ctrl elsewhere) in a rich text field are taken before its
+                    // text box sees the keys: egui's own Ctrl+U deletes to the start of the line (#28).
+                    let shortcuts = if fx.rich.is_some() && ui.memory(|m| m.has_focus(editor_id)) {
+                        use super::rich_field::Toggle;
+                        let mut cmd = |key| ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
+                        let toggles: Vec<Toggle> = [(egui::Key::B, Toggle::Bold), (egui::Key::I, Toggle::Italic), (egui::Key::U, Toggle::Underline)]
+                            .into_iter()
+                            .filter_map(|(key, what)| cmd(key).then_some(what))
+                            .collect();
+                        (toggles, cmd(egui::Key::E))
+                    } else {
+                        (Vec::new(), false)
+                    };
                     let (r, laid_out) = show_field_editor(ui, te, rect, turned);
                     if let Some(draft) = fx.rich.as_mut() {
                         draft.sync(&fx.text);
@@ -1389,18 +1402,12 @@ pub(crate) fn overlay(
                             fx.selection = sorted.start.into()..sorted.end.into();
                         }
                         // ⌘B / ⌘I / ⌘U (Ctrl elsewhere) format the selection, or what is typed next,
-                        // and ⌘E asks for the Format text panel (#8). Taken here, so the app's own
-                        // shortcuts (New bookmark is ⌘B) don't see them while the field has the keys.
-                        if r.has_focus() {
-                            use super::rich_field::Toggle;
-                            let cmd = |key| ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
-                            for (key, what) in [(egui::Key::B, Toggle::Bold), (egui::Key::I, Toggle::Italic), (egui::Key::U, Toggle::Underline)] {
-                                if cmd(key) {
-                                    draft.toggle(&fx.selection, what);
-                                }
-                            }
-                            want_format |= cmd(egui::Key::E);
+                        // and ⌘E asks for the Format text panel (#8). Taken above, so neither the
+                        // text box nor the app's own shortcuts (New bookmark is ⌘B) see them.
+                        for what in &shortcuts.0 {
+                            draft.toggle(&fx.selection, *what);
                         }
+                        want_format |= shortcuts.1;
                     }
                     // The form field's own logical name; not a visual/preordered label.
                     let r = r.accessible_name(f.name.clone());
