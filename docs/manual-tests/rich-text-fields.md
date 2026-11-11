@@ -32,7 +32,7 @@ running app.
 | # | Do | Expect |
 |---|----|--------|
 | 1 | Click into a rich field and click away without changing anything. | It looks identical; Undo isn't offered. |
-| 2 | Edit a word, commit, then Undo (⌘Z / Ctrl+Z) and Redo. | Undo brings back the field exactly as it was, its original appearance included; Redo re-applies the edit. |
+| 2 | Edit a word, commit, then Undo (⌘Z / Ctrl+Z) and Redo. | Undo brings back the field's value and formatting, as PdfCraft draws it (not necessarily the other app's original drawing, #33); Redo re-applies the edit. |
 | 3 | Change something, then press Escape. | Everything since opening the field is discarded. |
 | 4 | Type at the start, middle and end of a bold run. | New text takes the style of the character before it (after it, at the very start). |
 
@@ -97,3 +97,16 @@ Build: a local build of `main` after #21 (the commit wasn't noted), with `CRAFT_
 | 11 | Pass | |
 
 Also reported: ☐ still shows the "can't draw" notice (#24); Field Properties can't change a field in the form's own font (#25); blank lines are lost on commit (#26).
+
+### Run 2 (2026-11-11)
+
+Build: `main` with #36 (fixes for #28, #29, #30 and #32), craft-fonts found through an absolute
+`CRAFT_FONTS_DIR`.
+
+| # | Result | Notes |
+|---|--------|-------|
+| 1 | Pass | |
+| 2 | Pass | Bringing back the other app's drawing on undo is no longer required (#33, not planned). |
+| 3 to 20 | Pass | |
+| 21 | Fail | The blank line isn't kept (#26); spaces at the start and end of lines are trimmed (#37). |
+| 22 | Pass | |
