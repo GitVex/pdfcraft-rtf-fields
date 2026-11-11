@@ -416,13 +416,23 @@ pub fn parse(rv: &str, ds: Option<&str>, base: Style) -> Option<RichValue> {
 
 struct Reader {
     paragraphs: Vec<Paragraph>,
-    /// The paragraph being read, if any text has started one.
+    /// The paragraph being read, if text or a `p` element has started one.
     current: Option<Paragraph>,
 }
 
 impl Reader {
     fn finish(&mut self) {
-        if let Some(p) = self.current.take() {
+        if let Some(mut p) = self.current.take() {
+            // A line break that ends a paragraph adds no line, as in HTML: Acrobat writes a blank
+            // line as `<p><br/></p>` (#26).
+            if let Some(last) = p.spans.last_mut()
+                && last.text.ends_with('\n')
+            {
+                last.text.pop();
+                if last.text.is_empty() {
+                    p.spans.pop();
+                }
+            }
             self.paragraphs.push(p);
         }
     }
@@ -457,16 +467,20 @@ impl Reader {
             self.push_text("\n", style, align);
             return;
         }
-        // A paragraph starts afresh, and what follows it starts another.
+        // A paragraph starts afresh, and what follows it starts another. A `p` is a paragraph even
+        // with nothing in it: a blank line (#26).
         if is_block && tag != "body" {
             self.finish();
+        }
+        if tag == "p" {
+            self.current = Some(Paragraph { align, spans: Vec::new() });
         }
         for child in node.children() {
             if child.is_element() {
                 self.block(child, style, align, depth.saturating_add(1));
             } else if let Some(text) = child.is_text().then(|| child.text()).flatten() {
-                // Indentation between blocks is markup, not text.
-                if is_block && self.current.is_none() && text.trim().is_empty() {
+                // Indentation between blocks, and before a paragraph's first text, is markup.
+                if is_block && self.current.as_ref().is_none_or(|p| p.spans.is_empty()) && text.trim().is_empty() {
                     continue;
                 }
                 let text: String = text.chars().map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c }).collect();
@@ -561,6 +575,22 @@ mod tests {
         assert_eq!(parse(&huge, None, BASE), None);
         let deep = format!("{}text{}", "<span>".repeat(5000), "</span>".repeat(5000));
         assert!(parse(&deep, None, BASE).is_none_or(|r| r.plain_text().len() <= 4), "deep nesting is bounded, not followed");
+    }
+
+    /// #26: an empty paragraph is a blank line, kept when written and read back; Acrobat's
+    /// `<p><br/></p>` is one blank line too, and a line break that ends a paragraph adds none.
+    #[test]
+    fn blank_paragraphs_read_back_as_blank_lines() {
+        let base = Style::of_font("Helvetica", 10.0, [0.0; 3]);
+        let para = |t: &str| Paragraph { align: None, spans: if t.is_empty() { Vec::new() } else { vec![Span { text: t.into(), style: base }] } };
+        let value = RichValue { paragraphs: vec![para("Title"), para(""), para("Body")] };
+        assert_eq!(parse(&value.to_xhtml(), None, base), Some(value.clone()));
+        assert_eq!(value.plain_text(), "Title\r\rBody");
+        let acrobat = "<body><p>Title</p><p><br/></p><p>Body<br/></p></body>";
+        assert_eq!(parse(acrobat, None, base), Some(value));
+        // Indentation in the markup before a paragraph's text is still not text.
+        let indented = "<body>\n  <p>\n    <span>Title</span></p>\n</body>";
+        assert_eq!(parse(indented, None, base).map(|r| r.plain_text()), Some("Title".to_string()));
     }
 
     #[test]

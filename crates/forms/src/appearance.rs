@@ -1380,11 +1380,14 @@ fn rich_lines(rich: &RichValue, fonts: &[RunFont], font_of: &[Vec<usize>], size_
     let new_line = |align| RichLine { runs: Vec::new(), width: 0.0, size: 0.0, align };
     let mut lines = Vec::new();
     let mut line = new_line(rich.paragraphs.first().and_then(|p| p.align));
+    // Whether `line` was started by wrapping, which alone drops the spaces it starts with (#37).
+    let mut wrapped = false;
     for (i, p) in rich.paragraphs.iter().enumerate() {
         let span_fonts = font_of.get(i).map_or(&[][..], Vec::as_slice);
         if i > 0 {
             if wrap {
                 lines.push(std::mem::replace(&mut line, new_line(p.align)));
+                wrapped = false;
             } else if let (Some(first), Some(&f)) = (p.spans.first(), span_fonts.first()) {
                 line.runs.push((f, first.style, " ".into()));
             }
@@ -1396,6 +1399,7 @@ fn rich_lines(rich: &RichValue, fonts: &[RunFont], font_of: &[Vec<usize>], size_
                 if j > 0 {
                     if wrap {
                         lines.push(std::mem::replace(&mut line, new_line(p.align)));
+                        wrapped = false;
                     } else {
                         line.runs.push((f, span.style, " ".into()));
                     }
@@ -1407,9 +1411,11 @@ fn rich_lines(rich: &RichValue, fonts: &[RunFont], font_of: &[Vec<usize>], size_
                     let so_far: f64 = line.runs.iter().filter_map(|(f, s, t)| Some(fonts.get(*f)?.width(t, size_of(s)))).sum();
                     if wrap && !line.runs.is_empty() && so_far + ink > room + 0.01 {
                         lines.push(std::mem::replace(&mut line, new_line(p.align)));
+                        wrapped = true;
                     }
-                    // A wrapped line doesn't start with the spaces that ended the one before.
-                    if line.runs.is_empty() && word.trim().is_empty() && !lines.is_empty() {
+                    // A wrapped line doesn't start with the spaces that ended the one before; a
+                    // paragraph or a line after a line break keeps its own (#37).
+                    if line.runs.is_empty() && word.trim().is_empty() && wrapped {
                         continue;
                     }
                     match line.runs.last_mut() {
@@ -1423,7 +1429,16 @@ fn rich_lines(rich: &RichValue, fonts: &[RunFont], font_of: &[Vec<usize>], size_
         }
     }
     lines.push(line);
+    // A blank line (an empty paragraph, or two line breaks in a row) is as tall as the line before
+    // it, or the first one after it at the start (#26).
+    let first = lines.iter().map(|l| l.size).find(|s| *s > 0.0).unwrap_or(0.0);
+    let mut before = first;
     for l in &mut lines {
+        if l.size > 0.0 {
+            before = l.size;
+        } else {
+            l.size = before;
+        }
         l.width = line_ink(l, fonts, size_of);
     }
     lines
