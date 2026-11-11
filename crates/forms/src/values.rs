@@ -351,7 +351,7 @@ fn embed_rich_faces(doc: &mut Document, rich: &crate::rich::RichValue) -> Result
         }
     }
     for font in wanted {
-        crate::author::ensure_form_font(doc, font)?;
+        crate::author::ensure_form_font(doc, &font)?;
     }
     Ok(())
 }

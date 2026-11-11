@@ -42,9 +42,10 @@ fn format_arg(v: &Value) -> Result<Format> {
 }
 
 /// `{"border": "#FF0000" | "none", "fill": …, "width": 1-3, "style": "solid"|…, "text_color": …,
-/// "font": "helvetica"|"times-bold"|…}` (`FieldFont::key`), changing only what is given.
-fn look_arg(v: &Value) -> Result<pdfcraft_engine::FieldLookPatch> {
-    use pdfcraft_engine::{BorderStyle, FieldFont, FieldLookPatch};
+/// "font": "helvetica"|"times-bold"|…}` (`FieldFont::key`), changing only what is given. `fonts`
+/// is what this document can give a field, so one of the form's own fonts can be named too (#25).
+fn look_arg(v: &Value, fonts: &[pdfcraft_engine::FieldFont]) -> Result<pdfcraft_engine::FieldLookPatch> {
+    use pdfcraft_engine::{BorderStyle, FieldLookPatch};
     let o = v.as_object().ok_or_else(|| bad("appearance must be an object"))?;
     for key in o.keys() {
         if !["border", "fill", "text_color", "width", "style", "font"].contains(&key.as_str()) {
@@ -85,8 +86,8 @@ fn look_arg(v: &Value) -> Result<pdfcraft_engine::FieldLookPatch> {
             .transpose()?,
         font: string("font")?
             .map(|s| {
-                FieldFont::all().into_iter().find(|f| f.key() == s).ok_or_else(|| {
-                    let known: Vec<&str> = FieldFont::all().iter().map(|f| f.key()).collect();
+                fonts.iter().find(|f| f.key() == s).cloned().ok_or_else(|| {
+                    let known: Vec<&str> = fonts.iter().map(|f| f.key()).collect();
                     bad(format!("unknown font {s:?} ({})", known.join(", ")))
                 })
             })
@@ -781,7 +782,11 @@ impl Automation {
             options: a.get("options").map(|_| a.strs("options")).transpose()?.map(|v| v.into_iter().map(str::to_owned).collect()),
             font_size: a.opt_num("font_size")?,
             look: None,
-            appearance: a.get("appearance").map(look_arg).transpose()?.filter(|p| *p != pdfcraft_engine::FieldLookPatch::default()),
+            appearance: a
+                .get("appearance")
+                .map(|v| look_arg(v, &doc.field_fonts()))
+                .transpose()?
+                .filter(|p| *p != pdfcraft_engine::FieldLookPatch::default()),
             format: a.get("format").map(format_arg).transpose()?,
             validate: a.get("validate").map(validate_arg).transpose()?,
             calculate: a.get("calculate").map(calculate_arg).transpose()?,

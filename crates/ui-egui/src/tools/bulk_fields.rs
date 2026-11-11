@@ -48,6 +48,8 @@ pub struct Draft {
     pub font: Change<FieldFont>,
     /// The original resource can be a custom font outside the three built-in choices.
     pub font_label: String,
+    /// Every font these fields can be given, the form's own among them (#25).
+    pub fonts: Vec<FieldFont>,
     pub text: Change<[f64; 3]>,
     pub border: Change<Option<[f64; 3]>>,
     pub fill: Change<Option<[f64; 3]>>,
@@ -116,12 +118,15 @@ impl Draft {
             .into_iter()
             .map(|(bit, label, inverted)| Change::from_values(fields.iter().map(|f| f.has(bit) != inverted)).map(|c| (bit, label, inverted, c)))
             .collect::<Option<Vec<_>>>()?;
-        let mut font = Change::from_values(looks.iter().map(|l| l.font))?;
+        let mut font = Change::from_values(looks.iter().map(|l| l.font.clone()))?;
+        let fonts = doc.field_fonts();
         let resource = prepare::da_font(&fields.first()?.da);
         font.mixed |= fields.iter().any(|f| prepare::da_font(&f.da) != resource);
         let font_label = if font.mixed {
             "Mixed".to_string()
-        } else if FieldFont::from_resource(resource).is_some() {
+        // `from_resource` also matches a /DA that names a base font (`/Helvetica`), which the
+        // resource names below don't; the form's own fonts are matched by resource name (#25).
+        } else if FieldFont::from_resource(resource).is_some() || fonts.iter().any(|f| f.resource() == resource) {
             font.value.label().to_string()
         } else {
             "Custom font".to_string()
@@ -137,6 +142,7 @@ impl Draft {
             font_size: Change::from_values(fields.iter().map(|f| prepare::da_size(&f.da)))?,
             font,
             font_label,
+            fonts,
             text: Change::from_values(looks.iter().map(|l| l.text))?,
             border: Change::from_values(looks.iter().map(|l| l.border))?,
             fill: Change::from_values(looks.iter().map(|l| l.fill))?,
@@ -174,7 +180,7 @@ impl Draft {
                 width: self.width.apply.then_some(self.width.value),
                 style: self.style.apply.then_some(self.style.value),
                 text: (self.text_appearance && self.text.apply).then_some(self.text.value),
-                font: (self.text_appearance && self.font.apply).then_some(self.font.value),
+                font: (self.text_appearance && self.font.apply).then(|| self.font.value.clone()),
             };
             let props = FieldProps {
                 tooltip: self.tooltip.changed(&f.tooltip.clone().unwrap_or_default()),
@@ -297,8 +303,8 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut Draft, t: &theme::Tokens) -> (bool
                     let font_label = if d.font.apply { d.font.value.label().to_string() } else { d.font_label.clone() };
                     row(ui, "Font:", &mut d.font, |ui, v| {
                         craft_ui::ComboBox::from_id_salt("bulk-font").selected_text(tl!(&font_label)).show_ui(ui, |ui| {
-                            for font in FieldFont::all() {
-                                ui.selectable_value(v, font, font.label());
+                            for font in &d.fonts {
+                                ui.selectable_value(v, font.clone(), font.label());
                             }
                         });
                     });

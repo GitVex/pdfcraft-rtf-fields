@@ -99,7 +99,7 @@ fn shared_properties_preserve_mixed_values_and_undo_the_whole_change() {
     h.get_by_label("OK").click();
     h.run_steps(4);
     assert!(h.state().dialog.is_none());
-    for (name, look, value) in [("alpha", original[0], "Ada"), ("beta", original[1], "Lovelace")] {
+    for (name, look, value) in [("alpha", original[0].clone(), "Ada"), ("beta", original[1].clone(), "Lovelace")] {
         let field = doc(&h).form.iter().find(|f| f.name == name).unwrap();
         assert!(field.has(field_flags::REQUIRED));
         assert_eq!(field.value, [value]);

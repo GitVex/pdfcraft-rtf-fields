@@ -24,7 +24,7 @@ pub(crate) fn ensure_form(doc: &mut Document) -> Result<ObjRef, FormError> {
     let mut added = inline_fonts_as_objects(doc, &mut fonts);
     // Acrobat's resource names for the standard fonts its Appearance tab offers.
     for font in [FieldFont::Helvetica, FieldFont::Times, FieldFont::Courier] {
-        added |= add_form_font(doc, &mut fonts, font)?;
+        added |= add_form_font(doc, &mut fonts, &font)?;
     }
     if added {
         store_form_fonts(doc, &mut af, dr, fonts);
@@ -35,7 +35,7 @@ pub(crate) fn ensure_form(doc: &mut Document) -> Result<ObjRef, FormError> {
 
 /// [`ensure_form`], with `font` in `/DR` too: the bold and italic standard fonts are added when a
 /// field is given one, not to every form.
-pub(crate) fn ensure_form_font(doc: &mut Document, font: FieldFont) -> Result<ObjRef, FormError> {
+pub(crate) fn ensure_form_font(doc: &mut Document, font: &FieldFont) -> Result<ObjRef, FormError> {
     let r = ensure_form(doc)?;
     let mut af = doc.get(r).as_dict().cloned().unwrap_or_default();
     let (dr, mut fonts) = form_fonts(doc, &af);
@@ -49,11 +49,16 @@ pub(crate) fn ensure_form_font(doc: &mut Document, font: FieldFont) -> Result<Ob
 /// Add `font` to a `/DR` font dictionary under its resource name, unless that name is taken: a
 /// standard font as a reference, a craft face embedded whole (once, shared by every field that
 /// uses it). Whether it was added; a craft face that can't be embedded is an error.
-fn add_form_font(doc: &mut Document, fonts: &mut Dict, font: FieldFont) -> Result<bool, FormError> {
+fn add_form_font(doc: &mut Document, fonts: &mut Dict, font: &FieldFont) -> Result<bool, FormError> {
     // A craft face this build doesn't have is refused before anything else (its resource name
     // would otherwise fall back to Helvetica's and quietly succeed).
     if matches!(font, FieldFont::Craft(_)) && font.craft_face().is_none() {
         return Err(FormError::Invalid("this build has no such font".into()));
+    }
+    // A form font is one the form already carries (#25): its /DR entry is the author's and is
+    // never rewritten, and a name the form has no font for is refused rather than invented.
+    if matches!(font, FieldFont::Form(_)) {
+        return if fonts.contains(font.resource().as_bytes()) { Ok(false) } else { Err(FormError::Invalid("this form has no such font".into())) };
     }
     if fonts.contains(font.resource().as_bytes()) {
         return Ok(false);

@@ -25,6 +25,12 @@ running app.
   form that only holds allowed assets if screenshots are taken (AGENTS.md §1.2).
 - Note the commit tested (`git log -1 --oneline`) with each run below.
 
+- **Check the fonts are really there before anything else.** Open Format text ▸ Font in a rich
+  field: Carlito and Liberation Serif must be in the list. If they aren't, the build didn't find
+  craft-fonts and checks 8, 13 and 20 mean nothing — stop and fix the build rather than recording
+  the run. The automated tests can't warn you either: those that need the fonts skip themselves
+  silently when `CRAFT_FONTS` is empty, so a green `cargo test` says nothing about them.
+
 ## Checks
 
 ### Opening and committing
@@ -67,7 +73,9 @@ running app.
 | 19 | Tab from a rich field. | It commits and moves to the next field. |
 | 20 | Type ☐ into a field in a Calibri form. | Drawn as ☐ from the symbol face, with no "can't draw" notice. |
 | 21 | Press Enter twice in a rich field, type, commit and reopen. | The blank line is drawn and kept. |
-| 22 | Open Field Properties on a field in the form's own font. | It shows that font and offers it; OK without changes keeps it. |
+| 22a | Open Field Properties ▸ Appearance on a field in the form's own font (Calibri). | The Font list shows "Calibri", not "Helvetica", and offers it alongside Helvetica, Times, Courier and the craft-fonts families. |
+| 22b | Press OK without touching the font; then reopen the dialog, change only the line style, and press OK again. | The field is still drawn in Calibri both times (#25: before the fix a look applied for any reason rewrote the font to Helvetica). |
+| 22c | Change the font to Times Bold, OK; reopen and change it back to Calibri, OK. | Each pick is drawn after OK, and the field ends up in Calibri again. |
 
 ### Automation
 
@@ -109,4 +117,4 @@ Build: `main` with #36 (fixes for #28, #29, #30 and #32), craft-fonts found thro
 | 2 | Pass | Bringing back the other app's drawing on undo is no longer required (#33, not planned). |
 | 3 to 20 | Pass | |
 | 21 | Fail | The blank line isn't kept (#26); spaces at the start and end of lines are trimmed (#37). |
-| 22 | Pass | |
+| 22 | Pass | Recorded as a pass over a live bug: #25 was open, and the check as worded then was too coarse to catch it. Split into 22a–22c since. |

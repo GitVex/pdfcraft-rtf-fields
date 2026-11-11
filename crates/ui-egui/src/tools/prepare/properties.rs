@@ -85,11 +85,22 @@ pub(crate) fn body(ui: &mut egui::Ui, d: &mut FieldDraft, t: &crate::theme::Toke
                         );
                     });
                     ui.end_row();
+                    // The form's own fonts are in the list beside the standard and craft-fonts
+                    // ones (#25), and come from the document, so they are read before `look` is
+                    // borrowed to be edited.
+                    let mut fonts = if d.fonts.is_empty() { FieldFont::all() } else { d.fonts.clone() };
+                    // The field's own font is always offered, so picking another and coming back
+                    // restores it even when it is a font the list wouldn't have held.
+                    if let Some(own) = d.look.as_ref().map(|l| &l.font)
+                        && !fonts.contains(own)
+                    {
+                        fonts.push(own.clone());
+                    }
                     if let Some(l) = d.look.as_mut() {
                         ui.label(tl!("Font:"));
                         craft_ui::ComboBox::from_id_salt("field-font").selected_text(l.font.label()).show_ui(ui, |ui| {
-                            for f in FieldFont::all() {
-                                ui.selectable_value(&mut l.font, f, f.label());
+                            for f in &fonts {
+                                ui.selectable_value(&mut l.font, f.clone(), f.label());
                             }
                         });
                         ui.end_row();

@@ -161,11 +161,12 @@ pub fn set_props(doc: &mut Document, name: &str, props: &FieldProps) -> Result<S
     // The new default appearance when the size or the look changes.
     let size = props.font_size.unwrap_or_else(|| crate::appearance::parse_da(&f.da).size);
     let new_da = match &props.look {
-        Some(l) => da_string(l.font, size, l.text),
-        None => patch_da(&f.da, props.font_size, &props.appearance.unwrap_or_default()),
+        Some(l) => da_string(&l.font, size, l.text),
+        None => patch_da(&f.da, props.font_size, &props.appearance.clone().unwrap_or_default()),
     };
     // The chosen font goes into /DR, so the appearance is drawn and measured with it.
-    if let Some(font) = props.look.as_ref().map(|l| l.font).or_else(|| props.appearance.and_then(|p| p.font)) {
+    let font = props.look.as_ref().map(|l| &l.font).or_else(|| props.appearance.as_ref().and_then(|p| p.font.as_ref()));
+    if let Some(font) = font {
         ensure_form_font(doc, font)?;
     }
     let mut ff = f.flags;
@@ -271,12 +272,12 @@ pub fn set_props(doc: &mut Document, name: &str, props: &FieldProps) -> Result<S
             }
             None => {}
         }
-        if props.font_size.is_some() || props.look.is_some() || props.appearance.is_some_and(|p| p.font.is_some() || p.text.is_some()) {
+        if props.font_size.is_some() || props.look.is_some() || props.appearance.as_ref().is_some_and(|p| p.font.is_some() || p.text.is_some()) {
             d.set(b"DA".to_vec(), PdfString::literal(new_da.clone().into_bytes()));
         }
     })?;
     if props.appearance.is_some() || (props.font_size.is_some() && props.look.is_none()) {
-        let patch = &props.appearance.unwrap_or_default();
+        let patch = &props.appearance.clone().unwrap_or_default();
         for w in &f.widgets {
             patch_widget_look(doc, w, patch)?;
             // A widget's own /DA overrides its field's /DA. Patch that override separately

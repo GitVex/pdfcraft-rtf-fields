@@ -2268,15 +2268,19 @@ fn appearance_properties_restyle_every_widget() {
         text: [0.0, 0.0, 1.0],
         font: FieldFont::Times,
     };
-    set_props(&mut doc, "name", &FieldProps { look: Some(new), font_size: Some(14.0), ..FieldProps::default() }).unwrap();
+    set_props(&mut doc, "name", &FieldProps { look: Some(new.clone()), font_size: Some(14.0), ..FieldProps::default() }).unwrap();
     let doc = reopen(&doc);
     let f = field(&fields(&doc), "name").clone();
     assert_eq!(look(&doc, &f), new);
     let a = ap(&doc, &f.widgets[0]);
     assert!(a.contains("/TiRo 14 Tf") && a.contains("0 0 1 rg") && a.contains("[3] 0 d") && a.contains("(Ada) Tj"), "{a}");
     let mut doc = doc;
-    set_props(&mut doc, "name", &FieldProps { look: Some(Look { style: BorderStyle::Underline, fill: None, ..new }), ..FieldProps::default() })
-        .unwrap();
+    set_props(
+        &mut doc,
+        "name",
+        &FieldProps { look: Some(Look { style: BorderStyle::Underline, fill: None, ..new.clone() }), ..FieldProps::default() },
+    )
+    .unwrap();
     let a = ap(&doc, &field(&fields(&doc), "name").widgets[0]);
     assert!(!a.contains(" re S") && a.contains(" l S"), "underline only: {a}");
 }
@@ -2300,7 +2304,7 @@ fn every_standard_font_round_trips_as_a_field_font() {
         add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("name")).unwrap();
         set_value(&mut doc, "name", &FieldValue::Text("Ada".into())).unwrap();
         let f = field(&fields(&doc), "name").clone();
-        let new = Look { font, ..look(&doc, &f) };
+        let new = Look { font: font.clone(), ..look(&doc, &f) };
         set_props(&mut doc, "name", &FieldProps { look: Some(new), font_size: Some(12.0), ..FieldProps::default() }).unwrap();
         let doc = reopen(&doc);
         let f = field(&fields(&doc), "name").clone();
@@ -2914,7 +2918,7 @@ fn a_craft_font_is_embedded_once_and_round_trips_as_a_field_font() {
         add_field(&mut doc, 0, [50.0, y, 250.0, y + 20.0], &NewField::Text { multiline: false }, Some(name)).unwrap();
         set_value(&mut doc, name, &FieldValue::Text("Ada".into())).unwrap();
         let f = field(&fields(&doc), name).clone();
-        let new = Look { font: carlito, ..look(&doc, &f) };
+        let new = Look { font: carlito.clone(), ..look(&doc, &f) };
         set_props(&mut doc, name, &FieldProps { look: Some(new), font_size: Some(12.0), ..FieldProps::default() }).unwrap();
     }
     let doc = reopen(&doc);
@@ -7876,4 +7880,124 @@ fn a_four_entry_mk_colour_with_a_null_is_cmyk_with_zero() {
     assert!(cmyk.contains("0 0 1 0 k") && cmyk.contains("1 0 0 0 K"), "CMYK background and border: {cmyk}");
     let rgb = off(&mut doc, "rgb");
     assert!(rgb.contains("0 0 1 rg") && rgb.contains("1 0 0 RG"), "three numbers stay RGB: {rgb}");
+}
+
+/// Issue #25: a one-field form whose `/DR` holds a `/Calibri` font the file embeds, with the
+/// field's `/DA` naming it, as another app writes a form in its own font.
+fn calibri_form() -> Document {
+    let widths: Vec<&str> = (32u8..=126).map(|_| "500").collect();
+    let objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>".into(),
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>".into(),
+        "<< /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Calibri 8 0 R >> >> >>".into(),
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /DA (/Calibri 8 Tf 0 g) /V (Ada) \
+         /Rect [50 600 350 680] /P 3 0 R /MK << >> /BS << /W 0 >> >>"
+            .into(),
+        "<< /Length 4 >>\nstream\nfont\nendstream".into(),
+        "<< /Type /FontDescriptor /FontName /Calibri /Flags 32 /FontBBox [0 0 1000 1000] /ItalicAngle 0 \
+         /Ascent 750 /Descent -250 /CapHeight 650 /StemV 80 /FontFile2 6 0 R >>"
+            .into(),
+        format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /Calibri /Encoding /WinAnsiEncoding /FirstChar 32 \
+             /LastChar 126 /Widths [{}] /FontDescriptor 7 0 R >>",
+            widths.join(" ")
+        ),
+    ];
+    document(&objs)
+}
+
+/// The `/DA` font of a field, as the file holds it.
+fn da_of(doc: &Document, name: &str) -> String {
+    field(&fields(doc), name).da.clone()
+}
+
+/// Issue #25: Field Properties shows a field in the form's own font as that font, not Helvetica,
+/// and the font list offers it beside the standard and craft-fonts ones.
+#[test]
+fn a_field_in_the_forms_own_font_is_read_and_offered_as_that_font() {
+    let doc = calibri_form();
+    let f = field(&fields(&doc), "notes").clone();
+    let font = look(&doc, &f).font;
+    assert_eq!(font.label(), "Calibri", "the field's own font, not Helvetica: {font:?}");
+    assert_eq!(font.resource(), "Calibri");
+    assert_eq!(font.key(), "calibri", "automation names it by its family");
+    let offered = FieldFont::all_in(&doc);
+    assert!(offered.contains(&font), "the form's font is in the list: {offered:?}");
+    assert!(offered.contains(&FieldFont::Helvetica) && offered.contains(&FieldFont::TimesBoldItalic), "the standard fonts are still there");
+    // A form with no fonts of its own offers exactly what every build does.
+    assert_eq!(FieldFont::all_in(&one_page()), FieldFont::all());
+}
+
+/// Issue #25: pressing OK in Field Properties without touching the font leaves the field in the
+/// form's own font, even when another appearance property is applied with it.
+#[test]
+fn applying_a_look_without_changing_the_font_keeps_the_forms_own_font() {
+    let mut doc = calibri_form();
+    assert_eq!(da_of(&doc, "notes"), "/Calibri 8 Tf 0 g");
+    let f = field(&fields(&doc), "notes").clone();
+    let before = look(&doc, &f);
+    // The dialog hands back the look it read, with one unrelated change.
+    let new = Look { border: Some([1.0, 0.0, 0.0]), ..before.clone() };
+    set_props(&mut doc, "notes", &FieldProps { look: Some(new), ..FieldProps::default() }).unwrap();
+    let doc = reopen(&doc);
+    assert_eq!(da_of(&doc, "notes"), "/Calibri 8 Tf 0 0 0 rg", "the font stays Calibri");
+    let f = field(&fields(&doc), "notes").clone();
+    assert_eq!(look(&doc, &f).font, before.font, "and reads back as itself");
+    let a = ap(&doc, &f.widgets[0]);
+    assert!(a.contains("/Calibri 8 Tf"), "drawn in Calibri: {a}");
+}
+
+/// Issue #25: choosing another font changes the field and choosing the form's own font again
+/// restores it, both through a complete look and through an appearance patch (`form_set_props`).
+#[test]
+fn a_field_can_leave_the_forms_own_font_and_come_back_to_it() {
+    for patch_only in [false, true] {
+        let mut doc = calibri_form();
+        let f = field(&fields(&doc), "notes").clone();
+        let own = look(&doc, &f).font;
+        let apply = |doc: &mut Document, font: FieldFont| {
+            let f = field(&fields(doc), "notes").clone();
+            let props = if patch_only {
+                FieldProps { appearance: Some(LookPatch { font: Some(font), ..LookPatch::default() }), ..FieldProps::default() }
+            } else {
+                FieldProps { look: Some(Look { font, ..look(doc, &f) }), ..FieldProps::default() }
+            };
+            set_props(doc, "notes", &props).unwrap();
+        };
+        apply(&mut doc, FieldFont::TimesBold);
+        let mut doc = reopen(&doc);
+        assert!(da_of(&doc, "notes").contains("/TiBo "), "changed away: {}", da_of(&doc, "notes"));
+        assert_eq!(look(&doc, field(&fields(&doc), "notes")).font, FieldFont::TimesBold, "patch_only={patch_only}");
+        apply(&mut doc, own.clone());
+        let doc = reopen(&doc);
+        assert!(da_of(&doc, "notes").contains("/Calibri "), "and back: {}", da_of(&doc, "notes"));
+        assert_eq!(look(&doc, field(&fields(&doc), "notes")).font, own, "patch_only={patch_only}");
+        let a = ap(&doc, &field(&fields(&doc), "notes").widgets[0]);
+        assert!(a.contains("/Calibri "), "drawn in Calibri again: {a}");
+    }
+}
+
+/// Issue #25: the form's `/DR` entry for its own font is used as it is. Giving a field that font
+/// neither embeds it again nor rewrites the entry, and a font the form hasn't got is refused
+/// rather than invented.
+#[test]
+fn giving_a_field_the_forms_own_font_leaves_the_dr_entry_alone() {
+    let mut doc = calibri_form();
+    let before = dr_base_font(&doc, "Calibri");
+    assert_eq!(before.as_deref(), Some("Calibri"));
+    let own = look(&doc, field(&fields(&doc), "notes")).font;
+    add_field(&mut doc, 0, [50.0, 500.0, 250.0, 520.0], &NewField::Text { multiline: false }, Some("other")).unwrap();
+    let patch = LookPatch { font: Some(own), ..LookPatch::default() };
+    set_props(&mut doc, "other", &FieldProps { appearance: Some(patch), ..FieldProps::default() }).unwrap();
+    let doc = reopen(&doc);
+    assert!(da_of(&doc, "other").contains("/Calibri "), "the other field takes it too: {}", da_of(&doc, "other"));
+    assert_eq!(dr_base_font(&doc, "Calibri"), before, "the /DR entry is untouched");
+    // A form font this form has no entry for is refused, not written as a made-up Type1 font.
+    let mut doc = one_page();
+    add_field(&mut doc, 0, [50.0, 700.0, 250.0, 720.0], &NewField::Text { multiline: false }, Some("name")).unwrap();
+    let missing = LookPatch { font: Some(FieldFont::Form(FormFont::new("Calibri", "Calibri"))), ..LookPatch::default() };
+    let e = set_props(&mut doc, "name", &FieldProps { appearance: Some(missing), ..FieldProps::default() }).unwrap_err();
+    assert!(format!("{e}").contains("no such font"), "{e}");
+    assert!(dr_base_font(&doc, "Calibri").is_none(), "nothing was invented");
 }

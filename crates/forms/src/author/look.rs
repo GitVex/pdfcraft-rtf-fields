@@ -1,7 +1,7 @@
 use super::{Dict, Document, Field, FieldKind, FormError, ObjRef, Object, Stream, Widget, appearance, fields, invalid, rgb};
 
 /// The Appearance tab: borders, colours and text.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Look {
     pub border: Option<[f64; 3]>,
     pub fill: Option<[f64; 3]>,
@@ -14,7 +14,7 @@ pub struct Look {
 
 /// A partial Appearance-tab edit. Outer `None` keeps a property; `Some(None)` removes a
 /// border or fill colour. The patch is applied to each widget's own dictionaries.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LookPatch {
     pub border: Option<Option<[f64; 3]>>,
     pub fill: Option<Option<[f64; 3]>>,
@@ -50,7 +50,7 @@ pub(super) fn patch_da(da: &str, size: Option<f64>, patch: &LookPatch) -> String
     let numeric = |s: &str| s.parse::<f64>().is_ok();
     if patch.font.is_some() || size.is_some() {
         let old = appearance::parse_da(da);
-        let font = patch.font.map_or_else(|| old.font.clone(), |f| f.resource().to_string());
+        let font = patch.font.as_ref().map_or_else(|| old.font.clone(), |f| f.resource().to_string());
         // `parse_da` reads sizes up to 300 points; keep the same bound when writing.
         let size = appearance::fmt(size.unwrap_or(old.size).clamp(0.0, 300.0));
         let at = toks.iter().enumerate().rev().find(|(i, t)| t.as_str() == "Tf" && *i >= 2).map(|(i, _)| i);
@@ -168,9 +168,42 @@ impl BorderStyle {
     }
 }
 
-/// A field's font: one of the standard 14 Latin fonts (§9.6.2.2), which need no embedding, or a
-/// craft-fonts Latin face (#7), embedded whole in the form's `/DR` when a field is given it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A font the form already carries in its `/DR` (#25). A field whose `/DA` names one keeps it:
+/// the font is the form author's, PdfCraft neither embeds nor replaces it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormFont {
+    /// The `/DR` resource name the `/DA` uses (`Calibri`, `F1`).
+    resource: String,
+    /// The family from `/BaseFont`, as written, shown in the font list (`Calibri`).
+    family: String,
+    /// The name automation tools take: the family, lower case, letters and digits only.
+    key: String,
+}
+
+impl FormFont {
+    /// The form font named `resource` in the `/DR`, drawing `family`.
+    pub fn new(resource: &str, family: &str) -> FormFont {
+        let key = family.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+        FormFont { resource: resource.to_string(), family: family.to_string(), key }
+    }
+
+    /// Every font the form has, each resource once, in `/DR` order.
+    pub fn all(doc: &Document) -> Vec<FormFont> {
+        let mut out: Vec<FormFont> = Vec::new();
+        for (resource, family, _, _) in crate::appearance::form_fonts(doc) {
+            if family.is_empty() || out.iter().any(|f| f.resource == resource) {
+                continue;
+            }
+            out.push(FormFont::new(&resource, &family));
+        }
+        out
+    }
+}
+
+/// A field's font: one of the standard 14 Latin fonts (§9.6.2.2), which need no embedding, a
+/// craft-fonts Latin face (#7), embedded whole in the form's `/DR` when a field is given it, or
+/// one of the form's own `/DR` fonts (#25), which is left exactly as its author wrote it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FieldFont {
     Helvetica,
     HelveticaBold,
@@ -186,6 +219,8 @@ pub enum FieldFont {
     CourierBoldOblique,
     /// The `n`th face of [`pdfcraft_fonts::embedding::field_faces`].
     Craft(u16),
+    /// A font the form already has in its `/DR` (#25).
+    Form(FormFont),
 }
 
 impl FieldFont {
@@ -210,6 +245,21 @@ impl FieldFont {
         FieldFont::ALL.into_iter().chain(craft).collect()
     }
 
+    /// `all`, plus the fonts this form already has (#25), which only a document can name. This is
+    /// what the Appearance tab offers and what `form_set_props` takes.
+    pub fn all_in(doc: &Document) -> Vec<FieldFont> {
+        let form = FormFont::all(doc).into_iter().map(FieldFont::Form);
+        // A form font whose family is already offered as a standard or craft face would be a
+        // second entry with the same label, so it is left out.
+        let mut out = FieldFont::all();
+        for f in form {
+            if !out.iter().any(|o| o.label().eq_ignore_ascii_case(f.label())) {
+                out.push(f);
+            }
+        }
+        out
+    }
+
     /// The craft-fonts face of `family` (`Carlito`, `Liberation Sans`) in that weight and
     /// posture, if this build has it.
     pub(crate) fn craft_for(family: &str, bold: bool, italic: bool) -> Option<FieldFont> {
@@ -227,16 +277,18 @@ impl FieldFont {
     }
 
     /// The craft-fonts face this is, if it is one this build has.
-    pub(crate) fn craft_face(self) -> Option<&'static pdfcraft_fonts::embedding::FieldFace> {
+    pub(crate) fn craft_face(&self) -> Option<&'static pdfcraft_fonts::embedding::FieldFace> {
         match self {
-            FieldFont::Craft(n) => pdfcraft_fonts::embedding::field_faces().get(usize::from(n)),
+            FieldFont::Craft(n) => pdfcraft_fonts::embedding::field_faces().get(usize::from(*n)),
             _ => None,
         }
     }
 
-    /// The `/DR` resource name: Acrobat's for the standard fonts, a craft face's PostScript name.
-    pub(crate) fn resource(self) -> &'static str {
+    /// The `/DR` resource name: Acrobat's for the standard fonts, a craft face's PostScript name,
+    /// or the name the form already uses for one of its own fonts.
+    pub fn resource(&self) -> &str {
         match self {
+            FieldFont::Form(f) => &f.resource,
             FieldFont::Craft(_) => self.craft_face().map_or("Helv", |f| f.postscript.as_str()),
             FieldFont::Helvetica => "Helv",
             FieldFont::HelveticaBold => "HeBo",
@@ -253,9 +305,11 @@ impl FieldFont {
         }
     }
 
-    /// The font's `/BaseFont` (§9.6.2.2).
-    pub(crate) fn base_font(self) -> &'static str {
+    /// The font's `/BaseFont` (§9.6.2.2). A form font's is the family its `/DR` entry names; the
+    /// entry itself is never rewritten from this.
+    pub(crate) fn base_font(&self) -> &str {
         match self {
+            FieldFont::Form(f) => &f.family,
             FieldFont::Craft(_) => self.craft_face().map_or("Helvetica", |f| f.postscript.as_str()),
             FieldFont::Helvetica => "Helvetica",
             FieldFont::HelveticaBold => "Helvetica-Bold",
@@ -278,9 +332,18 @@ impl FieldFont {
         FieldFont::all().into_iter().find(|f| f.resource() == name || f.base_font() == name)
     }
 
-    /// The name automation tools take: `helvetica`, `times-bold-italic` and so on.
-    pub fn key(self) -> &'static str {
+    /// `from_resource`, falling back to one of this form's own `/DR` fonts (#25) so a field in a
+    /// font the file carries is read as that font rather than as Helvetica. Still `None` for a
+    /// name the form has no font for.
+    pub fn from_resource_in(doc: &Document, name: &str) -> Option<FieldFont> {
+        FieldFont::from_resource(name).or_else(|| FormFont::all(doc).into_iter().find(|f| f.resource == name).map(FieldFont::Form))
+    }
+
+    /// The name automation tools take: `helvetica`, `times-bold-italic` and so on; a form font's
+    /// is its family (`calibri`).
+    pub fn key(&self) -> &str {
         match self {
+            FieldFont::Form(f) => &f.key,
             FieldFont::Craft(_) => self.craft_face().map_or("helvetica", |f| f.key.as_str()),
             FieldFont::Helvetica => "helvetica",
             FieldFont::HelveticaBold => "helvetica-bold",
@@ -297,8 +360,9 @@ impl FieldFont {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &str {
         match self {
+            FieldFont::Form(f) => &f.family,
             FieldFont::Craft(_) => self.craft_face().map_or("Helvetica", |f| f.label.as_str()),
             FieldFont::Helvetica => "Helvetica",
             FieldFont::HelveticaBold => "Helvetica Bold",
@@ -409,12 +473,12 @@ pub fn look(doc: &Document, f: &Field) -> Look {
             _ => BorderStyle::Solid,
         },
         text,
-        font: FieldFont::from_resource(&parsed.font).unwrap_or(FieldFont::Helvetica),
+        font: FieldFont::from_resource_in(doc, &parsed.font).unwrap_or(FieldFont::Helvetica),
     }
 }
 
 /// A `/DA` string with the given font, size and colour.
-pub(super) fn da_string(font: FieldFont, size: f64, c: [f64; 3]) -> String {
+pub(super) fn da_string(font: &FieldFont, size: f64, c: [f64; 3]) -> String {
     let f = crate::appearance::fmt;
     format!("/{} {} Tf {} {} {} rg", font.resource(), f(size.clamp(0.0, 100.0)), f(c[0]), f(c[1]), f(c[2]))
 }

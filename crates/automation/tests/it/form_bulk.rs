@@ -61,7 +61,7 @@ fn bulk_properties_are_one_undo_step_preserve_other_looks_and_survive_save() {
     assert_eq!(out["fields"], json!(["alpha", "beta"]));
     let doc = a.session().get(DocId(id)).unwrap();
     assert_eq!(doc.can_undo(), Some("Change field properties"));
-    for (name, look) in [("alpha", original[0]), ("beta", original[1])] {
+    for (name, look) in [("alpha", original[0].clone()), ("beta", original[1].clone())] {
         let changed = doc.field_look(name).unwrap();
         assert_eq!(changed.width, 4.0);
         assert_eq!(changed.border, Some([1.0, 0.0, 0.0]));
@@ -333,7 +333,26 @@ fn craft_field_fonts_through_form_set_props() {
 /// (doc_info). Without craft-fonts, no such note.
 #[test]
 fn a_twin_drawn_for_a_missing_form_font_is_said() {
-    let dir = std::env::temp_dir().join(format!("pdfcraft-form-bulk-twin-{}", std::process::id()));
+    let (mut a, id, dir) = calibri_setup("twin");
+    let out = tool(&mut a, "form_fill", json!({"doc": id, "values": {"notes": "Sneak Attack"}}));
+    let warnings: Vec<String> =
+        out["warnings"].as_array().map(|w| w.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let repairs: Vec<String> =
+        tool(&mut a, "doc_info", json!({"doc": id}))["repairs"].as_array().unwrap().iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+    let said = |lines: &[String]| lines.iter().any(|w| w.contains("\"notes\"") && w.contains("Carlito for Calibri"));
+    if pdfcraft_engine::FieldFont::all().iter().any(|f| f.key() == "carlito") {
+        assert!(said(&warnings), "form_fill says so: {out}");
+        assert!(said(&repairs), "the repair log keeps it: {repairs:?}");
+    } else {
+        assert!(!said(&warnings) && !said(&repairs), "{out}");
+    }
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A form in the author's own font: its `/DR` names a `/Calibri` the file does not embed, and
+/// the one field's `/DA` uses it. Returns the automation, the open document and its directory.
+fn calibri_setup(test: &str) -> (Automation, u64, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("pdfcraft-form-bulk-{test}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let objs = [
         "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>",
@@ -356,19 +375,29 @@ fn a_twin_drawn_for_a_missing_form_font_is_said() {
     }
     pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
     std::fs::write(dir.join("calibri.pdf"), pdf).unwrap();
-    let mut a = Automation::new().with_root(&dir).unwrap();
+    let mut a = Automation::new().with_root(&dir).unwrap().with_clock(|| 1_700_000_000);
     let id = tool(&mut a, "doc_open", json!({"path": "calibri.pdf"}))["doc"].as_u64().unwrap();
-    let out = tool(&mut a, "form_fill", json!({"doc": id, "values": {"notes": "Sneak Attack"}}));
-    let warnings: Vec<String> =
-        out["warnings"].as_array().map(|w| w.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
-    let repairs: Vec<String> =
-        tool(&mut a, "doc_info", json!({"doc": id}))["repairs"].as_array().unwrap().iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
-    let said = |lines: &[String]| lines.iter().any(|w| w.contains("\"notes\"") && w.contains("Carlito for Calibri"));
-    if pdfcraft_engine::FieldFont::all().iter().any(|f| f.key() == "carlito") {
-        assert!(said(&warnings), "form_fill says so: {out}");
-        assert!(said(&repairs), "the repair log keeps it: {repairs:?}");
-    } else {
-        assert!(!said(&warnings) && !said(&repairs), "{out}");
-    }
+    (a, id, dir)
+}
+
+/// Issue #25: `form_set_props` takes one of the form's own fonts by its family name, as the
+/// Appearance tab offers it. The field keeps it through save and reopen, changing it away and
+/// back works, and the name is listed when an unknown one is refused.
+#[test]
+fn the_forms_own_fonts_through_form_set_props() {
+    let (mut a, id, dir) = calibri_setup("own-font");
+    let own = a.session().get(DocId(id)).unwrap().field_look("notes").unwrap().font;
+    assert_eq!(own.key(), "calibri", "the field is read as its own font: {own:?}");
+    // Away to a standard font, then back by name.
+    tool(&mut a, "form_set_props", json!({"doc": id, "field": "notes", "appearance": {"font": "times-bold"}}));
+    assert_eq!(a.session().get(DocId(id)).unwrap().field_look("notes").unwrap().font, pdfcraft_engine::FieldFont::TimesBold);
+    tool(&mut a, "form_set_props", json!({"doc": id, "field": "notes", "appearance": {"font": "calibri"}}));
+    assert_eq!(a.session().get(DocId(id)).unwrap().field_look("notes").unwrap().font, own);
+    tool(&mut a, "doc_save", json!({"doc": id, "path": "saved.pdf"}));
+    let reopened = tool(&mut a, "doc_open", json!({"path": "saved.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(a.session().get(DocId(reopened)).unwrap().field_look("notes").unwrap().font, own, "kept through save and reopen");
+    // The refusal lists this document's fonts, the form's own among them.
+    let err = a.call("form_set_props", &json!({"doc": id, "field": "notes", "appearance": {"font": "comic"}})).unwrap_err();
+    assert!(matches!(&err, ToolError::InvalidArgs(m) if m.contains("calibri") && m.contains("times-bold")), "{err:?}");
     std::fs::remove_dir_all(dir).ok();
 }

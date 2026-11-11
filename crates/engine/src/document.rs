@@ -741,6 +741,12 @@ impl Document {
         Some(pdfcraft_forms::look(&e.cos, f))
     }
 
+    /// Every font a field of this form can be given (Field Properties ▸ Appearance ▸ Font): the
+    /// standard fonts, the craft-fonts faces this build has, and the form's own `/DR` fonts (#25).
+    pub fn field_fonts(&self) -> Vec<pdfcraft_forms::FieldFont> {
+        self.editor.as_ref().map_or_else(pdfcraft_forms::FieldFont::all, |e| pdfcraft_forms::FieldFont::all_in(&e.cos))
+    }
+
     /// A rich text field's formatted value, as its appearance draws it, for the field editor to
     /// open with (#11); `None` for a field drawn plain.
     pub fn field_rich_value(&self, name: &str) -> Option<pdfcraft_forms::rich::RichValue> {

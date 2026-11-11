@@ -1265,7 +1265,8 @@ impl RunFont {
                 fd.set(b"Subtype".to_vec(), Object::name("Type1"));
                 fd.set(b"BaseFont".to_vec(), Object::name(f.base_font()));
                 fd.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
-                (crate::FieldFont::from_resource(f.base_font()).map_or("Helv", |f| f.resource()).to_string(), Object::Dict(fd))
+                let resource = crate::FieldFont::from_resource(f.base_font()).map_or_else(|| "Helv".to_string(), |f| f.resource().to_string());
+                (resource, Object::Dict(fd))
             }
             RunFont::Form { resource, object, .. } => (resource.clone(), object.clone()),
         }
@@ -1286,9 +1287,10 @@ fn family_key(name: &str) -> String {
     key.strip_suffix("ps").unwrap_or(key).to_string()
 }
 
-/// The form's `/DR` fonts as faces: resource name, family key, bold, italic, read from each
-/// font's `/BaseFont` (`ABCDEF+Calibri-BoldItalic`, `Arial,Bold`).
-fn form_faces(doc: &Document) -> Vec<(String, String, bool, bool)> {
+/// The form's `/DR` fonts: resource name, then the family and style read from each font's
+/// `/BaseFont` (`ABCDEF+Calibri-BoldItalic`, `Arial,Bold`), with the subset tag dropped. The
+/// family is left as it is written, so it can be shown as well as compared (#25).
+pub fn form_fonts(doc: &Document) -> Vec<(String, String, bool, bool)> {
     let fonts = acroform(doc).and_then(|af| {
         let dr = doc.resolve(af.get(b"DR")?);
         doc.resolve(dr.as_dict()?.get(b"Font")?).as_dict().cloned()
@@ -1303,9 +1305,14 @@ fn form_faces(doc: &Document) -> Vec<(String, String, bool, bool)> {
             let style = style.to_ascii_lowercase();
             let bold = ["bold", "black", "heavy"].iter().any(|w| style.contains(w));
             let italic = style.contains("italic") || style.contains("oblique");
-            Some((String::from_utf8_lossy(key).into_owned(), family_key(family), bold, italic))
+            Some((String::from_utf8_lossy(key).into_owned(), family.to_string(), bold, italic))
         })
         .collect()
+}
+
+/// `form_fonts` with each family reduced to its comparison key.
+fn form_faces(doc: &Document) -> Vec<(String, String, bool, bool)> {
+    form_fonts(doc).into_iter().map(|(res, family, bold, italic)| (res, family_key(&family), bold, italic)).collect()
 }
 
 /// The font families a rich text run can be set to beyond the standard ones (#12): the form's

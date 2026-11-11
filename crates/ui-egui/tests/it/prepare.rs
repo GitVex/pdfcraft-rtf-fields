@@ -395,7 +395,7 @@ fn appearance_tab_restyles_the_field() {
     }
     // Check egui's actual painted diagnostics, rather than reproducing the ID formula.
     assert!(h.output().shapes.iter().all(|shape| no_grid_id_warning(&shape.shape)), "palette grids must not share an ID");
-    let before = h.state().field_props.as_ref().unwrap().look.unwrap();
+    let before = h.state().field_props.as_ref().unwrap().look.clone().unwrap();
     assert_eq!(h.get_all_by_label("No color").count(), 2);
     h.get_all_by_label("No color").next().unwrap().click();
     h.run_steps(2);
@@ -1855,4 +1855,83 @@ fn with_prepare_open_a_double_click_on_a_field_leaves_the_polygon_unfinished() {
     let polygons = s.session.get(s.views[0].id).unwrap().info.annotations.iter().filter(|a| a.subtype == "Polygon").count();
     assert_eq!(polygons, 0, "the polygon is not finished");
     assert!(matches!(s.views[0].comments.gesture, Some(pdfcraft_ui_egui::comments::Gesture::Draw { .. })), "it is still being clicked out");
+}
+
+/// A one-field form in the author's own font: `/DR` names a `/Calibri` and the field's `/DA`
+/// uses it, as another app writes a form.
+fn calibri_form_bytes() -> Vec<u8> {
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 600 800] >>",
+        "<< /Type /Page /Parent 2 0 R /Annots [5 0 R] >>",
+        "<< /Fields [5 0 R] /DA (/Helv 0 Tf 0 g) /DR << /Font << /Calibri 6 0 R >> >> >>",
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (notes) /DA (/Calibri 10 Tf 0 g) /V (Ada) /Rect [50 700 350 720] /P 3 0 R >>",
+        "<< /Type /Font /Subtype /TrueType /BaseFont /Calibri /Encoding /WinAnsiEncoding >>",
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        pdf.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    pdf
+}
+
+/// Issue #25: Field Properties shows a field in the form's own font as that font and offers it,
+/// pressing OK without touching the font leaves the field in it even when another appearance
+/// property is applied, and choosing another font and coming back restores it.
+#[test]
+fn the_appearance_tab_shows_and_keeps_the_forms_own_font() {
+    use pdfcraft_engine::{BorderStyle, FieldFont};
+    let mut h = harness_with("calibri.pdf", calibri_form_bytes());
+    let da = |h: &Harness<'static, PdfCraftApp>| {
+        let s = h.state();
+        s.session.get(s.views[0].id).unwrap().form.iter().find(|f| f.name == "notes").map(|f| f.da.clone()).unwrap_or_default()
+    };
+    let font = |h: &Harness<'static, PdfCraftApp>| {
+        let s = h.state();
+        s.session.get(s.views[0].id).unwrap().field_look("notes").unwrap().font
+    };
+    assert_eq!(da(&h), "/Calibri 10 Tf 0 g");
+    h.state_mut().execute("form.prepare");
+    h.run_steps(2);
+    h.state_mut().open_field_props("notes", 0);
+    h.run_steps(2);
+    h.get_by_label("Appearance").click();
+    h.run_steps(2);
+    // The dialog shows the field's own font, and offers it beside the standard ones.
+    {
+        let d = h.state().field_props.as_ref().expect("open");
+        assert_eq!(d.look.as_ref().unwrap().font.label(), "Calibri", "shown as Calibri, not Helvetica");
+        assert!(d.fonts.iter().any(|f| f.label() == "Calibri"), "the form's font is offered: {:?}", d.fonts);
+        assert!(d.fonts.contains(&FieldFont::TimesBold), "and the standard ones still are");
+    }
+    // OK with another appearance property changed, but not the font.
+    {
+        let d = h.state_mut().field_props.as_mut().unwrap();
+        d.look.as_mut().unwrap().style = BorderStyle::Dashed;
+    }
+    h.get_by_label("OK").click();
+    h.run_steps(3);
+    assert!(da(&h).contains("/Calibri "), "the font is kept: {}", da(&h));
+    let own = font(&h);
+    assert_eq!(own.label(), "Calibri");
+    // Away to a standard font, then back to the form's own.
+    for want in [FieldFont::TimesBold, own.clone()] {
+        h.state_mut().open_field_props("notes", 0);
+        h.run_steps(2);
+        h.get_by_label("Appearance").click();
+        h.run_steps(2);
+        h.state_mut().field_props.as_mut().unwrap().look.as_mut().unwrap().font = want.clone();
+        h.get_by_label("OK").click();
+        h.run_steps(3);
+        assert_eq!(font(&h), want, "{:?} applied", want.label());
+    }
+    assert!(da(&h).contains("/Calibri "), "back in the form's own font: {}", da(&h));
 }
