@@ -62,6 +62,9 @@ pub struct Focus {
     /// The editor's selection (characters), as last seen while it had the keyboard: what the
     /// Format text panel formats.
     pub selection: std::ops::Range<usize>,
+    /// Put [`Self::selection`] back in the editor when it takes the keyboard back: egui collapses
+    /// a text box's selection while another widget (the Format text panel) has the keyboard (#29).
+    pub restore_selection: bool,
 }
 
 /// A drop-down's open list: the first item shown, the item the keys or the pointer are on, and
@@ -377,6 +380,7 @@ fn open_focus(f: &FormField, widget: usize) -> Focus {
         rich: None,
         rich_loaded: false,
         selection: 0..0,
+        restore_selection: false,
     }
 }
 
@@ -487,6 +491,7 @@ pub(crate) fn format_panel(view: &mut DocView, ui: &mut egui::Ui, t: &crate::the
     }
     if changed {
         fx.request_focus = true;
+        fx.restore_selection = true;
     }
 }
 
@@ -1156,6 +1161,14 @@ fn settle_text_editor(
     if fx.request_focus {
         r.request_focus();
         fx.request_focus = false;
+        if std::mem::take(&mut fx.restore_selection)
+            && let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), r.id)
+        {
+            let n = fx.text.chars().count();
+            let (start, end) = (fx.selection.start.min(n), fx.selection.end.min(n));
+            st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(start), egui::text::CCursor::new(end))));
+            st.store(ui.ctx(), r.id);
+        }
         if std::mem::take(&mut fx.select_all)
             && let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), r.id)
         {
@@ -1291,7 +1304,12 @@ pub(crate) fn overlay(
     // Read before `away` is asked, which looks at the layers: never inside `ctx.input`, whose lock
     // it would wait on.
     let (pointer, pressed_at) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_pressed()));
-    let outside = pointer.is_some_and(away) || crate::edit_text_ui::focus_pos(ctx).is_some_and(away);
+    // The keyboard counts only when something else has it (the panel's size box): the editor's own
+    // box can reach past the window for a long value, its centre off the page (#30).
+    let editor_id = egui::Id::unique(("form-field", view.pane.key, &f.name, focus.widget));
+    let keys_away =
+        ctx.memory(|m| m.focused()).filter(|id| *id != editor_id).and_then(|id| ctx.read_response(id)).is_some_and(|r| away(r.rect.center()));
+    let outside = pointer.is_some_and(away) || keys_away;
     // A click on the page elsewhere while it waits without the keyboard closes it, as a click away would.
     let page_click_elsewhere = pressed_at && pointer.is_some_and(|p| !away(p) && !rect.contains(p));
     let zoom = xf.zoom();
@@ -1360,6 +1378,19 @@ pub(crate) fn overlay(
                     } else if fx.rich.is_some() {
                         te = te.layouter(&mut rich_layouter);
                     }
+                    // ⌘B / ⌘I / ⌘U / ⌘E (Ctrl elsewhere) in a rich text field are taken before its
+                    // text box sees the keys: egui's own Ctrl+U deletes to the start of the line (#28).
+                    let shortcuts = if fx.rich.is_some() && ui.memory(|m| m.has_focus(editor_id)) {
+                        use super::rich_field::Toggle;
+                        let cmd = |key| ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
+                        let toggles: Vec<Toggle> = [(egui::Key::B, Toggle::Bold), (egui::Key::I, Toggle::Italic), (egui::Key::U, Toggle::Underline)]
+                            .into_iter()
+                            .filter_map(|(key, what)| cmd(key).then_some(what))
+                            .collect();
+                        (toggles, cmd(egui::Key::E))
+                    } else {
+                        (Vec::new(), false)
+                    };
                     let (r, laid_out) = show_field_editor(ui, te, rect, turned);
                     if let Some(draft) = fx.rich.as_mut() {
                         draft.sync(&fx.text);
@@ -1371,18 +1402,12 @@ pub(crate) fn overlay(
                             fx.selection = sorted.start.into()..sorted.end.into();
                         }
                         // ⌘B / ⌘I / ⌘U (Ctrl elsewhere) format the selection, or what is typed next,
-                        // and ⌘E asks for the Format text panel (#8). Taken here, so the app's own
-                        // shortcuts (New bookmark is ⌘B) don't see them while the field has the keys.
-                        if r.has_focus() {
-                            use super::rich_field::Toggle;
-                            let cmd = |key| ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
-                            for (key, what) in [(egui::Key::B, Toggle::Bold), (egui::Key::I, Toggle::Italic), (egui::Key::U, Toggle::Underline)] {
-                                if cmd(key) {
-                                    draft.toggle(&fx.selection, what);
-                                }
-                            }
-                            want_format |= cmd(egui::Key::E);
+                        // and ⌘E asks for the Format text panel (#8). Taken above, so neither the
+                        // text box nor the app's own shortcuts (New bookmark is ⌘B) see them.
+                        for what in &shortcuts.0 {
+                            draft.toggle(&fx.selection, *what);
                         }
+                        want_format |= shortcuts.1;
                     }
                     // The form field's own logical name; not a visual/preordered label.
                     let r = r.accessible_name(f.name.clone());
@@ -1776,6 +1801,7 @@ mod tests {
             rich: None,
             rich_loaded: false,
             selection: 0..0,
+            restore_selection: false,
         }
     }
 

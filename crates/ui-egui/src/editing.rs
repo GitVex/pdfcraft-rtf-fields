@@ -1332,6 +1332,7 @@ mod revert_draft_tests {
             rich: None,
             rich_loaded: false,
             selection: 0..0,
+            restore_selection: false,
         }
     }
 

@@ -2811,3 +2811,127 @@ fn command_e_in_a_rich_field_shows_format_text() {
     assert!(h.query_by_label("Bold").is_some(), "with Format text for the field");
     assert!(h.state().views[0].forms.focus.is_some(), "the field is still being edited");
 }
+
+/// The normal appearance stream of field `name`'s first widget, as the document draws it now.
+fn drawn_appearance(h: &Harness<'static, PdfCraftApp>, name: &str) -> String {
+    let s = h.state();
+    let bytes = s.session.save_bytes(s.views[0].id).unwrap();
+    let obj = s.session.get(s.views[0].id).unwrap().form.iter().find(|f| f.name == name).unwrap().widgets[0].obj;
+    let doc = pdfcraft_cos::Document::open(bytes).unwrap();
+    let w = doc.get(obj);
+    let ap = doc.resolve(w.as_dict().unwrap().get(b"AP").unwrap());
+    let n = doc.resolve(ap.as_dict().unwrap().get(b"N").unwrap());
+    let pdfcraft_cos::Object::Stream(st) = &*n else { panic!("{n:?}") };
+    String::from_utf8_lossy(&st.decoded().unwrap()).into_owned()
+}
+
+/// Issue #30: a rich text field with a long value, whose editor reaches past the window, commits
+/// on a click on the page like any other, and the page draws what was formatted. It stayed open:
+/// the editor's own box, centred off the page, counted as the keyboard being in the panel.
+#[test]
+fn a_long_rich_field_commits_on_a_page_click_and_draws_its_formatting() {
+    let paragraphs: Vec<String> = (1..=60).map(|n| format!("Line {n} of a long value")).collect();
+    let rv = format!("<body>{}</body>", paragraphs.iter().map(|p| format!("<p>{p}</p>")).collect::<String>());
+    let mut h = harness_with_bytes("long.pdf", rich_form_with(&rv, &paragraphs.join("\\r"), ""));
+    click_field(&mut h, "notes", 0);
+    assert!(h.state().views[0].forms.focus.as_ref().is_some_and(|f| f.rich.is_some()), "the editor opened, rich");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    let arrow = h.get_by_label("Font size").rect().center();
+    click_at(&mut h, arrow);
+    h.run_steps(2);
+    let preset = h.get_by_label("18 pt").rect().center();
+    click_at(&mut h, preset);
+    h.run_steps(2);
+    assert!(h.state().views[0].forms.focus.is_some(), "the panel keeps the field open");
+    // Beside the field on the page, which the editor's box doesn't cover.
+    let beside = {
+        let s = h.state();
+        let doc = s.session.get(s.views[0].id).unwrap();
+        let f = doc.form.iter().find(|f| f.name == "notes").unwrap();
+        let r = pdfcraft_ui_egui::forms_ui::field_screen_rect(&s.views[0], &doc.info, f, 0).unwrap();
+        egui::pos2(r.max.x + 40.0, r.min.y - 40.0)
+    };
+    click_at(&mut h, beside);
+    h.run_steps(3);
+    assert!(h.state().views[0].forms.focus.is_none(), "committed");
+    let ap = drawn_appearance(&h, "notes");
+    assert!(ap.contains(" 18 Tf") && !ap.contains(" 12 Tf"), "drawn at 18 pt: {ap}");
+}
+
+/// Issue #29: two changes in a row from Format text apply to the same selection: the panel gives
+/// the field editor back its selection, which egui collapses while the panel has the keyboard.
+#[test]
+fn two_changes_from_format_text_apply_to_the_same_selection() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    select_last(&mut h, 6);
+    // A font from the list: the list keeps the keyboard over several frames.
+    let list = h.get_by_label("Font").rect().center();
+    click_at(&mut h, list);
+    h.run_steps(2);
+    let times = h.get_by_label("Times").rect().center();
+    click_at(&mut h, times);
+    h.run_steps(2);
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.selection.clone()), Some(6..12), "still selected");
+    let swatch = h.get_by_label("Colour").rect().center();
+    click_at(&mut h, swatch);
+    h.run_steps(2);
+    let red = h.get_by_label("Red").rect().center();
+    click_at(&mut h, red);
+    h.run_steps(2);
+    commit(&mut h);
+    use pdfcraft_engine::form_rich::Family;
+    let runs: Vec<(String, Family, bool)> = saved_runs(&h).into_iter().map(|(t, s)| (t, s.family, s.color[0] > 0.5)).collect();
+    // Only "Attack" is in Times and red; "Sneak" and the space keep their look.
+    assert_eq!(
+        runs,
+        [("Sneak".to_string(), Family::Helvetica, false), (" ".to_string(), Family::Helvetica, false), ("Attack".to_string(), Family::Times, true)]
+    );
+}
+
+/// Issue #28: Ctrl+U on Windows and Linux (Ctrl is the command key there) underlines a rich
+/// field's selection and deletes nothing: egui's own Ctrl+U deletes to the start of the line.
+#[test]
+fn ctrl_u_underlines_without_deleting() {
+    let ctrl = egui::Modifiers { ctrl: true, command: true, ..Default::default() };
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    select_last(&mut h, 6);
+    h.key_press_modifiers(ctrl, egui::Key::U);
+    h.run_steps(2);
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.text.as_str()), Some("Sneak Attack"), "nothing deleted");
+    commit(&mut h);
+    let runs: Vec<(String, bool)> = saved_runs(&h).into_iter().map(|(t, s)| (t, s.underline)).collect();
+    assert_eq!(runs.last(), Some(&("Attack".to_string(), true)), "{runs:?}");
+}
+
+/// Issues #31 and #32: a font from the list, then centring, both apply to a selection across two
+/// paragraphs, and the page draws them once committed: each line centred in the field's
+/// 260-point box, in Times.
+#[test]
+fn a_font_and_centring_on_two_paragraphs_are_drawn_after_commit() {
+    let rv = "<body><p>First</p><p>Second</p></body>";
+    let mut h = harness_with_bytes("aligned.pdf", rich_form_with(rv, "First\\rSecond", ""));
+    click_field(&mut h, "notes", 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    let list = h.get_by_label("Font").rect().center();
+    click_at(&mut h, list);
+    h.run_steps(2);
+    let times = h.get_by_label("Times").rect().center();
+    click_at(&mut h, times);
+    h.run_steps(2);
+    let button = h.get_by_label("Alignment").rect().center();
+    click_at(&mut h, button);
+    h.run_steps(2);
+    let centre = h.get_by_label("Centre").rect().center();
+    click_at(&mut h, centre);
+    h.run_steps(2);
+    commit(&mut h);
+    let ap = drawn_appearance(&h, "notes");
+    assert!(ap.contains("/TiRo 12 Tf") || ap.contains("/Times-Roman 12 Tf"), "in Times: {ap}");
+    let xs: Vec<f64> = ap.lines().filter_map(|l| l.strip_suffix(" Tm")).filter_map(|l| l.split(' ').nth(4)?.parse().ok()).collect();
+    assert_eq!(xs.len(), 2, "{ap}");
+    assert!(xs.iter().all(|x| *x > 100.0), "both lines centred, not at the left padding: {xs:?}");
+}
