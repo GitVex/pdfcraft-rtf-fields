@@ -2935,3 +2935,30 @@ fn a_font_and_centring_on_two_paragraphs_are_drawn_after_commit() {
     assert_eq!(xs.len(), 2, "{ap}");
     assert!(xs.iter().all(|x| *x > 100.0), "both lines centred, not at the left padding: {xs:?}");
 }
+
+/// Issues #26 and #37: Enter twice in a rich field makes a blank line, and spaces typed at the
+/// start and end of a line are kept; all of it is drawn once committed and reopens the same.
+#[test]
+fn blank_lines_and_spaces_typed_in_a_rich_field_are_kept() {
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    h.key_press(egui::Key::End);
+    h.run_steps(1);
+    for _ in 0..2 {
+        h.key_press(egui::Key::Enter);
+        h.run_steps(1);
+    }
+    h.event(egui::Event::Text("   indented  ".into()));
+    h.run_steps(2);
+    commit(&mut h);
+    let s = h.state();
+    let rich = s.session.get(s.views[0].id).unwrap().field_rich_value("notes").expect("a rich value");
+    assert_eq!(rich.plain_text(), "Sneak Attack\r\r   indented  ", "kept as typed");
+    let ap = drawn_appearance(&h, "notes");
+    let ys: Vec<f64> = ap.lines().filter_map(|l| l.strip_suffix(" Tm")).filter_map(|l| l.split(' ').nth(5)?.parse().ok()).collect();
+    assert!(ap.contains("(   indented  ) Tj"), "drawn with its spaces: {ap}");
+    assert!(ys.len() >= 2 && (ys[ys.len() - 2] - ys[ys.len() - 1] - 27.6).abs() < 0.01, "a blank row between: {ys:?} in {ap}");
+    // Reopened, the editor shows it as typed.
+    click_field(&mut h, "notes", 0);
+    assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.text.as_str()), Some("Sneak Attack\n\n   indented  "));
+}

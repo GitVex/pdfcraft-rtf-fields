@@ -257,6 +257,21 @@ fn paragraph_alignment_through_form_fill_rich() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// Issue #26: a blank line written through `form_fill` `rich` (`\n\n`) is kept as an empty
+/// paragraph through save and reopen.
+#[test]
+fn a_blank_line_through_form_fill_rich() {
+    let (mut a, id, dir) = setup("rich-blank");
+    tool(&mut a, "form_fill", json!({"doc": id, "rich": {"alpha": [{"text": "Title\n\nBody"}]}}));
+    tool(&mut a, "doc_save", json!({"doc": id, "path": "rich-blank.pdf"}));
+    let reopened = tool(&mut a, "doc_open", json!({"path": "rich-blank.pdf"}))["doc"].as_u64().unwrap();
+    let doc = a.session().get(pdfcraft_engine::DocId(reopened)).unwrap();
+    let rich = doc.field_rich_value("alpha").expect("a rich value");
+    let paragraphs: Vec<String> = rich.paragraphs.iter().map(|p| p.spans.iter().map(|s| s.text.as_str()).collect()).collect();
+    assert_eq!(paragraphs, ["Title", "", "Body"]);
+    std::fs::remove_dir_all(dir).ok();
+}
+
 /// Issue #12: `form_fields` lists the families rich runs can use (`rich_fonts`), and a run in one
 /// of the craft-fonts families is drawn in that face, which the form then holds, through save and
 /// reopen. Without craft-fonts there are none to list, and the name is refused.

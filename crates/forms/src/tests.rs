@@ -2498,6 +2498,37 @@ fn an_automatic_size_in_one_font_is_unchanged() {
     }
 }
 
+/// The rows (`Tm` y) of an appearance, in order.
+fn tm_ys(ap: &str) -> Vec<f64> {
+    ap.lines().filter_map(|l| l.strip_suffix(" Tm")).filter_map(|l| l.split(' ').nth(5)?.parse().ok()).collect()
+}
+
+/// Issue #26: a blank line, as an empty paragraph or as two line breaks, is drawn as tall as the
+/// line before it: at 12 pt, the next text is two rows (2 × 13.8) further down.
+#[test]
+fn a_blank_line_in_a_rich_value_is_drawn() {
+    for (rv, value) in [
+        (format!("{XHTML}<p>Title</p><p></p><p>Body</p></body>"), "Title\r\rBody"),
+        (format!("{XHTML}<p>Title<br/><br/>Body</p></body>"), "Title\r\rBody"),
+    ] {
+        let (ap, _) = rich_field(&rv, value, true);
+        let ap = String::from_utf8_lossy(&ap);
+        let ys = tm_ys(&ap);
+        assert_eq!(ys.len(), 2, "{ap}");
+        assert!((ys[0] - ys[1] - 27.6).abs() < 0.01, "a blank row between: {ys:?}");
+    }
+}
+
+/// Issue #37: spaces at the start of a paragraph, and after a line break, are drawn; a line that
+/// wrapped still doesn't start with the space it wrapped at.
+#[test]
+fn spaces_starting_a_rich_paragraph_or_line_are_drawn() {
+    let rv = format!("{XHTML}<p>First</p><p>   indented</p><p>a<br/>  b</p></body>");
+    let (ap, _) = rich_field(&rv, "First\r   indented\ra\r  b", true);
+    let ap = String::from_utf8_lossy(&ap);
+    assert!(ap.contains("(   indented) Tj") && ap.contains("(  b) Tj"), "{ap}");
+}
+
 /// Issue #3: text outside ASCII is written in WinAnsi bytes, as the plain value is.
 #[test]
 fn a_rich_value_writes_winansi_bytes() {
