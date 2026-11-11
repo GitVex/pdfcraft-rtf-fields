@@ -13,6 +13,66 @@ use pdfcraft_engine::form_rich::{Align, Face, Family, Paragraph, RichValue, Span
 /// What a character looks like, and the alignment of the paragraph it is in.
 type Look = (Style, Option<Align>);
 
+/// The egui family showing craft-fonts field face `n` ([`install_faces`]).
+fn face_family(n: usize) -> FontFamily {
+    FontFamily::Name(format!("rich-field-face-{n}").into())
+}
+
+/// Make the craft-fonts Latin faces available to the field editor, so each run is shown in its
+/// own font while it is typed (#27). Whether they are ready: added now, they take effect from the
+/// next pass, so this asks for one. Nothing to add without craft-fonts. The faces are the build's
+/// own, never a font of the machine or of the document (AGENTS.md §1.4).
+pub fn install_faces(ctx: &egui::Context) -> bool {
+    let faces = pdfcraft_fonts::embedding::field_faces();
+    if faces.is_empty() {
+        return false;
+    }
+    if ctx.fonts(|f| f.definitions().families.contains_key(&face_family(0))) {
+        return true;
+    }
+    let mut definitions = ctx.fonts(|f| f.definitions().clone());
+    let fallback = definitions.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    for (n, face) in faces.iter().enumerate() {
+        let name = format!("rich-field-face-{n}");
+        definitions.font_data.insert(name.clone(), std::sync::Arc::new(egui::FontData::from_static(face.font.bytes)));
+        // Characters the face lacks come from the interface fonts, as they do now.
+        let stack = std::iter::once(name).chain(fallback.iter().cloned()).collect();
+        definitions.families.insert(face_family(n), stack);
+    }
+    ctx.set_fonts(definitions);
+    ctx.request_repaint();
+    false
+}
+
+/// The craft-fonts face that shows a run in `style` in the editor (#27), by its place in
+/// `field_faces`: a form font by its open twin (Calibri as Carlito), a craft-fonts family as
+/// itself, and the standard families by the faces with their widths (Helvetica, Times and Courier
+/// as Liberation Sans, Serif and Mono), in the run's weight and posture. `None` where there is no
+/// such face (another form font, or a build without craft-fonts).
+pub fn face_for(style: &Style) -> Option<usize> {
+    let name = match &style.face {
+        Some(face) => face.as_str(),
+        None => match style.family {
+            Family::Helvetica => "Liberation Sans",
+            Family::Times => "Liberation Serif",
+            Family::Courier => "Liberation Mono",
+        },
+    };
+    if let Some(pdfcraft_fonts::ShapedScript::Twin(n)) = pdfcraft_fonts::twin_for(name, style.bold, style.italic) {
+        return Some(usize::from(n));
+    }
+    let key = pdfcraft_fonts::embedding::face_key(name);
+    let want = match (style.bold, style.italic) {
+        (false, false) => "Regular",
+        (true, false) => "Bold",
+        (false, true) => "Italic",
+        (true, true) => "Bold Italic",
+    };
+    pdfcraft_fonts::embedding::field_faces()
+        .iter()
+        .position(|f| pdfcraft_fonts::embedding::face_key(f.font.family) == key && f.font.style.eq_ignore_ascii_case(want))
+}
+
 /// A font family picked for text: a standard one, or one named (a form font or a craft-fonts
 /// family).
 #[derive(Clone, Debug, PartialEq)]
@@ -303,7 +363,9 @@ impl RichDraft {
     /// The editor's layout of `text` (the editor's, perhaps typed into since the last sync): each
     /// run in its weight, posture, colour and underline, at its size times `scale` (screen pixels
     /// per point), or `auto` pixels for a run sized automatically; wrapped at `wrap` when given.
-    pub fn job(&self, text: &str, scale: f32, auto: f32, wrap: Option<f32>) -> LayoutJob {
+    /// With `faces` ([`install_faces`]), a run is shown in its own font ([`face_for`]); otherwise,
+    /// or with no face for it, in the interface font.
+    pub fn job(&self, text: &str, scale: f32, auto: f32, wrap: Option<f32>, faces: bool) -> LayoutJob {
         let mut draft = self.clone();
         draft.sync(text);
         let mut job = LayoutJob::default();
@@ -320,17 +382,20 @@ impl RichDraft {
             let from = chars.get(start).map_or(text.len(), |c| c.0);
             let to = chars.get(end).map_or(text.len(), |c| c.0);
             let size = if look.size > 0.0 { look.size as f32 * scale } else { auto };
-            let family = match (look.bold, look.family) {
-                (true, _) => FontFamily::Name("semibold".into()),
-                (false, Family::Courier) => FontFamily::Monospace,
-                (false, _) => FontFamily::Proportional,
+            let face = face_for(&look).filter(|_| faces);
+            let family = match (face, look.bold, look.family) {
+                (Some(n), ..) => face_family(n),
+                (None, true, _) => FontFamily::Name("semibold".into()),
+                (None, false, Family::Courier) => FontFamily::Monospace,
+                (None, false, _) => FontFamily::Proportional,
             };
             let [r, g, b] = look.color.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8);
             let color = Color32::from_rgb(r, g, b);
             let format = TextFormat {
                 font_id: FontId::new(size.max(1.0), family),
                 color,
-                italics: look.italic,
+                // A face of its own is already italic; the interface font is slanted instead.
+                italics: look.italic && face.is_none(),
                 underline: if look.underline { Stroke::new((size / 14.0).max(1.0), color) } else { Stroke::NONE },
                 ..Default::default()
             };
@@ -473,16 +538,66 @@ mod tests {
         assert_eq!(d.value().paragraphs[1], Paragraph { align: Some(Align::Left), spans: vec![Span { text: "X".into(), style: BASE }] });
     }
 
+    /// #27: the face a run is shown in while typed: a form font by its open twin, a craft-fonts
+    /// family as itself, a standard family by the face with its widths, in its weight; none for
+    /// another font, or without craft-fonts.
+    #[test]
+    fn a_run_is_shown_in_the_face_of_its_font() {
+        let label = |style: Style| face_for(&style).and_then(|n| pdfcraft_fonts::embedding::field_faces().get(n)).map(|f| f.label.as_str());
+        if pdfcraft_fonts::embedding::field_faces().is_empty() {
+            assert_eq!(label(bold()), None);
+            return;
+        }
+        let named = |name: &str, s: Style| Style { face: Face::named(name), ..s };
+        assert_eq!(label(named("Calibri", bold())), Some("Carlito Bold"));
+        assert_eq!(label(named("Carlito", BASE)), Some("Carlito"));
+        assert_eq!(label(Style { family: Family::Times, ..BASE }), Some("Liberation Serif"));
+        assert_eq!(label(Style { family: Family::Courier, italic: true, ..BASE }), Some("Liberation Mono Italic"));
+        assert_eq!(label(BASE), Some("Liberation Sans"));
+        assert_eq!(label(named("MinionPro", BASE)), None, "no open face for it");
+    }
+
+    /// #27: shown in its face, a run is as wide in the editor as the face's own advances make it,
+    /// so the editor wraps where the committed drawing will.
+    #[test]
+    fn a_run_in_its_face_is_laid_out_at_its_own_widths() {
+        let ctx = egui::Context::default();
+        let pass = |f: &dyn Fn(&egui::Context)| ctx.run_ui(egui::RawInput::default(), |ui| f(ui.ctx())).textures_delta.clear();
+        pass(&|_| {});
+        // Added in one pass, in use from the next.
+        pass(&|ctx| assert!(!install_faces(ctx)));
+        pass(&|_| {});
+        if pdfcraft_fonts::embedding::field_faces().is_empty() {
+            return; // no craft-fonts in this build
+        }
+        assert!(install_faces(&ctx), "ready from the next pass");
+        let style = Style { face: Face::named("Calibri"), ..bold() };
+        let d = RichDraft::open(Some(&rich(&[("Sneak Attack", style)])), BASE, "Sneak Attack");
+        let job = d.job("Sneak Attack", 10.0, 20.0, None, true);
+        assert!(matches!(&job.sections[0].format.font_id.family, FontFamily::Name(n) if n.starts_with("rich-field-face-")));
+        assert!(!job.sections[0].format.italics);
+        let laid = ctx.fonts_mut(|f| f.layout_job(job)).size().x;
+        let n = face_for(&style).unwrap();
+        let em: f64 = "Sneak Attack"
+            .chars()
+            .filter_map(|c| pdfcraft_fonts::face_cluster(pdfcraft_fonts::ShapedScript::Twin(n as u8), c))
+            .map(|c| c.advance)
+            .sum();
+        // 10 pt at 10 px per point: 100 px to the em.
+        let expected = (em * 100.0) as f32;
+        assert!((laid - expected).abs() <= expected * 0.02, "laid out {laid}, the face's widths {expected}");
+    }
+
     #[test]
     fn the_layout_shows_each_run_in_its_look() {
         let d = RichDraft::open(Some(&rich(&[("ab", bold()), ("cd", Style { italic: true, underline: true, ..BASE })])), BASE, "abcd");
-        let job = d.job("abcd", 2.0, 20.0, None);
+        let job = d.job("abcd", 2.0, 20.0, None, false);
         assert_eq!(job.sections.len(), 2);
         assert_eq!(job.sections[0].format.font_id.family, FontFamily::Name("semibold".into()));
         assert_eq!(job.sections[0].format.font_id.size, 20.0, "10 pt at 2 px per point");
         assert!(job.sections[1].format.italics && job.sections[1].format.underline != Stroke::NONE);
         // Text typed since the last sync is laid out with the looks it will take.
-        let range = &d.job("abXcd", 2.0, 20.0, None).sections[0].byte_range;
+        let range = &d.job("abXcd", 2.0, 20.0, None, false).sections[0].byte_range;
         assert_eq!((range.start.0, range.end.0), (0, 3));
     }
 }

@@ -179,6 +179,7 @@ use tools::measure_ui;
 use tools::object_ui;
 pub use tools::prepare;
 use tools::redact_ui;
+pub use tools::rich_field;
 use tools::sign_ui;
 use tools::stamps_ui;
 use tools::tags_ui;
