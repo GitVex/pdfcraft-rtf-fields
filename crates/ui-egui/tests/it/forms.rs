@@ -2962,3 +2962,33 @@ fn blank_lines_and_spaces_typed_in_a_rich_field_are_kept() {
     click_field(&mut h, "notes", 0);
     assert_eq!(h.state().views[0].forms.focus.as_ref().map(|f| f.text.as_str()), Some("Sneak Attack\n\n   indented  "));
 }
+
+/// Issue #27: with the craft-fonts faces in the build, opening a rich field makes them available
+/// to its editor, and a font picked from Format text is laid out in that font's face while the
+/// field is open (Times in Liberation Serif, which has its widths).
+#[test]
+fn a_font_picked_for_a_rich_field_is_shown_while_it_is_open() {
+    use pdfcraft_ui_egui::rich_field::{face_for, install_faces};
+    let mut h = harness_with_bytes("rich.pdf", rich_form());
+    click_field(&mut h, "notes", 0);
+    h.run_steps(2);
+    if face_for(&pdfcraft_engine::form_rich::Style::of_font("Times-Roman", 12.0, [0.0; 3])).is_none() {
+        return; // no craft-fonts in this build: runs are shown in the interface font, as before
+    }
+    assert!(install_faces(&h.ctx), "the open rich field installed the faces");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    let list = h.get_by_label("Font").rect().center();
+    click_at(&mut h, list);
+    h.run_steps(2);
+    let times = h.get_by_label("Times").rect().center();
+    click_at(&mut h, times);
+    h.run_steps(2);
+    let fx = h.state().views[0].forms.focus.as_ref().expect("still open");
+    let job = fx.rich.as_ref().unwrap().job(&fx.text, 1.0, 12.0, None, true);
+    let serif = face_for(&pdfcraft_engine::form_rich::Style::of_font("Times-Roman", 12.0, [0.0; 3])).unwrap();
+    let bold_serif = face_for(&pdfcraft_engine::form_rich::Style::of_font("Times-Bold", 12.0, [0.0; 3])).unwrap();
+    let families: Vec<String> = job.sections.iter().map(|s| format!("{:?}", s.format.font_id.family)).collect();
+    assert!(families.iter().any(|f| f.contains(&format!("rich-field-face-{bold_serif}"))), "\"Sneak\" in Liberation Serif Bold: {families:?}");
+    assert!(families.iter().any(|f| f.contains(&format!("rich-field-face-{serif}"))), "the rest in Liberation Serif: {families:?}");
+}

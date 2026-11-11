@@ -1353,8 +1353,10 @@ pub(crate) fn overlay(
                     // A rich text field shows its runs as they are formatted (#11); a turned one is
                     // painted from its plain text, as before.
                     let rich = fx.rich.clone().filter(|_| !turned);
+                    // Each run in its own font while it is typed, once the faces are in (#27).
+                    let faces = rich.is_some() && super::rich_field::install_faces(ui.ctx());
                     let mut rich_layouter = move |ui: &egui::Ui, text: &dyn egui::TextBuffer, _: f32| {
-                        let job = rich.as_ref().map(|d| d.job(text.as_str(), zoom, font, multiline.then_some(wrap))).unwrap_or_default();
+                        let job = rich.as_ref().map(|d| d.job(text.as_str(), zoom, font, multiline.then_some(wrap), faces)).unwrap_or_default();
                         ui.fonts_mut(|f| f.layout_job(job))
                     };
                     let mut te = if multiline { egui::TextEdit::multiline(&mut fx.text) } else { egui::TextEdit::singleline(&mut fx.text) };
