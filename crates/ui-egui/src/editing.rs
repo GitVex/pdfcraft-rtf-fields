@@ -100,13 +100,27 @@ fn select_after_edit(
     }
 }
 
+/// The field an edit redraws the appearance of, where the form model can't show that it changed:
+/// `FormField` and its widgets carry no border, fill, line width, style or widget `/DA`, no rich
+/// text formatting (only the plain `value`), and no button icon. Comparing the two states misses
+/// all of those, so the edit names the field itself and its pages are marked whatever the
+/// comparison says — otherwise the new appearance waits for the next zoom or scroll to be drawn
+/// (#41).
+fn appearance_edit_field(edit: &Edit) -> Option<&str> {
+    match edit {
+        Edit::SetFieldProps { name, props } => {
+            (props.look.is_some() || props.appearance.is_some() || props.check_style.is_some()).then_some(name.as_str())
+        }
+        Edit::SetFieldValue { name, .. } | Edit::SetFieldImage { name, .. } => Some(name.as_str()),
+        _ => None,
+    }
+}
+
 /// The pages whose widgets differ between two form states, and the (field, page) pairs whose
 /// value changed and so must not be drawn from the baked page.
 ///
-/// `edit` is the edit that produced `after`: an appearance-only change can't be seen by comparing
-/// the two states, because `FormField` and its widgets carry no border, fill, line width or style
-/// (and a widget's own `/DA` isn't in them either). Such a page is marked from the edit instead,
-/// or the new appearance would wait for the next zoom or scroll to be drawn.
+/// `edit` is the edit that produced `after`, for the appearance changes the states don't show
+/// (see [`appearance_edit_field`]).
 fn form_edit_pages(
     before: &[pdfcraft_engine::FormField],
     after: &[pdfcraft_engine::FormField],
@@ -121,6 +135,9 @@ fn form_edit_pages(
             Some(old) => {
                 changed_pages.extend(pages(f));
                 changed_pages.extend(pages(old));
+                // Still the plain text changing: the overlay draws the model's value, which has
+                // no formatting, so covering a formatting-only commit with it would show the
+                // words unstyled instead of briefly stale (#41).
                 if old.value != f.value {
                     unbaked.extend(pages(f).into_iter().map(|p| (f.name.clone(), p)));
                 }
@@ -134,9 +151,8 @@ fn form_edit_pages(
     for old in before.iter().filter(|old| !after.iter().any(|f| f.name == old.name)) {
         changed_pages.extend(old.widgets.iter().filter_map(|w| w.page));
     }
-    if let Edit::SetFieldProps { name, props } = edit
-        && (props.look.is_some() || props.appearance.is_some() || props.check_style.is_some())
-        && let Some(f) = after.iter().find(|f| &f.name == name)
+    if let Some(name) = appearance_edit_field(edit)
+        && let Some(f) = after.iter().find(|f| f.name == name)
     {
         changed_pages.extend(pages(f));
     }

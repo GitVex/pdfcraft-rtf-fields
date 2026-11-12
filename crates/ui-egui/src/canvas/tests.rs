@@ -3270,3 +3270,28 @@ fn an_appearance_only_field_edit_makes_its_page_stale() {
         assert!(h.state().views[0].page_out_of_date(0), "{case}: the page is redrawn without waiting for a zoom");
     }
 }
+
+/// Issue #41: committing a formatting-only change to a rich text field must redraw its page too.
+/// The model holds only the plain text, so two commits of the same words in different styles
+/// compare equal and nothing would mark the page.
+#[test]
+fn a_formatting_only_rich_value_edit_makes_its_page_stale() {
+    use pdfcraft_engine::FieldValue;
+    use pdfcraft_engine::form_rich::{Align, Family, Paragraph, RichValue, Span, Style};
+    let style = |bold: bool| Style { family: Family::Helvetica, face: None, bold, italic: false, size: 10.0, color: [0.0; 3], underline: false };
+    let value = |bold: bool, align: Option<Align>| {
+        FieldValue::Rich(RichValue { paragraphs: vec![Paragraph { align, spans: vec![Span { text: "Ada".into(), style: style(bold) }] }] })
+    };
+    // The same words, restyled: bold alone, then alignment alone.
+    for (case, first, second) in
+        [("bold", value(false, None), value(true, None)), ("alignment", value(false, None), value(false, Some(Align::Center)))]
+    {
+        let mut h = appearance_edit_harness();
+        settle_rasters(&mut h);
+        assert!(h.state_mut().apply_edit(pdfcraft_engine::Edit::SetFieldValue { name: "notes".into(), value: first }), "{case}: first");
+        settle_rasters(&mut h);
+        assert!(!h.state().views[0].page_out_of_date(0), "{case}: the page is fresh before the formatting-only edit");
+        assert!(h.state_mut().apply_edit(pdfcraft_engine::Edit::SetFieldValue { name: "notes".into(), value: second }), "{case}: second");
+        assert!(h.state().views[0].page_out_of_date(0), "{case}: the page is redrawn without waiting for a zoom");
+    }
+}
