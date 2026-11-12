@@ -102,14 +102,20 @@ fn select_after_edit(
 
 /// The pages whose widgets differ between two form states, and the (field, page) pairs whose
 /// value changed and so must not be drawn from the baked page.
+///
+/// `edit` is the edit that produced `after`: an appearance-only change can't be seen by comparing
+/// the two states, because `FormField` and its widgets carry no border, fill, line width or style
+/// (and a widget's own `/DA` isn't in them either). Such a page is marked from the edit instead,
+/// or the new appearance would wait for the next zoom or scroll to be drawn.
 fn form_edit_pages(
     before: &[pdfcraft_engine::FormField],
     after: &[pdfcraft_engine::FormField],
+    edit: &Edit,
 ) -> (std::collections::BTreeSet<usize>, Vec<(String, usize)>) {
     let mut changed_pages = std::collections::BTreeSet::new();
     let mut unbaked = Vec::new();
+    let pages = |field: &pdfcraft_engine::FormField| field.widgets.iter().filter_map(|w| w.page).collect::<Vec<_>>();
     for f in after {
-        let pages = |field: &pdfcraft_engine::FormField| field.widgets.iter().filter_map(|w| w.page).collect::<Vec<_>>();
         match before.iter().find(|old| old.name == f.name) {
             Some(old) if old == f => {}
             Some(old) => {
@@ -127,6 +133,12 @@ fn form_edit_pages(
     }
     for old in before.iter().filter(|old| !after.iter().any(|f| f.name == old.name)) {
         changed_pages.extend(old.widgets.iter().filter_map(|w| w.page));
+    }
+    if let Edit::SetFieldProps { name, props } = edit
+        && (props.look.is_some() || props.appearance.is_some() || props.check_style.is_some())
+        && let Some(f) = after.iter().find(|f| &f.name == name)
+    {
+        changed_pages.extend(pages(f));
     }
     (changed_pages, unbaked)
 }
@@ -204,7 +216,7 @@ impl PdfCraftApp {
                 // on, and the values that show over them until those pages' rasters have them.
                 let form_edit = form_before
                     .filter(|_| doc.info.pages.len() == page_count_before && doc.xfa.is_some() == had_xfa && doc.xfa.is_none() && is_form_edit(&edit))
-                    .map(|before| form_edit_pages(&before, &doc.form));
+                    .map(|before| form_edit_pages(&before, &doc.form, &edit));
                 let one_page = comment_page(&edit).or_else(|| content_page(&edit));
                 if signatures_before.is_some_and(|before| crate::canvas::signature_states_changed(&before, &doc.signatures)) {
                     // A signature shows its state on its own page, which an edit elsewhere can
